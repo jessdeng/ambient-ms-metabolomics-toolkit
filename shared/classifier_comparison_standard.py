@@ -193,9 +193,9 @@ def make_groups(y_labels, names):
     Build a cross-validation group label per sample so that technical
     replicates of one colony share a group and never split across folds.
 
-    group = '<condition>::<well>'  e.g. 'Amber::A6'
+    group = '<condition>::<well>'  e.g. 'ConditionA::W1'
 
-    Parsed from the filename token immediately before T<n> (e.g. A6T1 -> A6).
+    Parsed from the filename token immediately before T<n> (e.g. W1T2 -> W1).
     Falls back to the filename if the pattern is absent (then each file is its
     own group, which simply disables grouping for that sample).
     """

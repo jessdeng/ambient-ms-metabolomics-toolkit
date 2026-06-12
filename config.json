@@ -1,0 +1,22 @@
+{
+  "_comment": "Edit this file to configure your experiment. Values here override config.py defaults. Only the fields you change need to be present.",
+
+  "EXPERIMENT": "your_experiment_folder",
+
+  "MZ_MIN": 100,
+  "MZ_MAX": 1000,
+  "BIN_WIDTH": 0.5,
+
+  "NORMALIZATION": "tic",
+  "LOG_TRANSFORM": "log10",
+  "SCALING": "autoscale",
+
+  "VARIANCE_PERCENTILE": 25,
+  "ABUNDANCE_PERCENTILE": 5,
+
+  "RANDOM_SEED": 42,
+  "CV_FOLDS": 5,
+
+  "RUN_PERMUTATION_TEST": true,
+  "N_PERMUTATIONS": 100
+}

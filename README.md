@@ -4,7 +4,7 @@ A Python pipeline for untargeted ambient mass spectrometry metabolomics. It perf
 
 For detailed notes on parameter choices and output interpretation, see [NOTES.md](NOTES.md).
 
-> **Instrument note:** Default parameters are optimised for fungal metabolomics data collected on a SCIEX 4500 triple quadrupole in MS1-only mode (LMJ-SSP). Adjust `config.py` for other instruments or sample types.
+> **Instrument note:** Default parameters (0.5 Da bins, 100–1000 Da m/z range, TIC normalization) are appropriate for low-resolution ambient MS and direct infusion workflows. Adjust `config.json` or `config.py` for your instrument and sample type.
 
 ---
 
@@ -12,13 +12,14 @@ For detailed notes on parameter choices and output interpretation, see [NOTES.md
 
 1. [Repository Structure](#repository-structure)
 2. [Quick Start](#quick-start)
-3. [Data Format](#data-format)
-4. [Methodological Note](#methodological-note)
-5. [Which Pipeline Should I Use?](#which-pipeline-should-i-use)
-6. [Output Files](#output-files)
-7. [Environment Setup](#environment-setup)
-8. [Reproducibility](#reproducibility)
-9. [Citation](#citation)
+3. [Configuration (config.json)](#configuration-configjson)
+4. [Data Format](#data-format)
+5. [Methodological Note](#methodological-note)
+6. [Which Pipeline Should I Use?](#which-pipeline-should-i-use)
+7. [Output Files](#output-files)
+8. [Environment Setup](#environment-setup)
+9. [Reproducibility](#reproducibility)
+10. [Citation](#citation)
 
 ---
 
@@ -73,7 +74,7 @@ ambient-ms-metabolomics-toolkit/
 
 ```bash
 # 1. Clone
-git clone https://github.com/jessdeng/ambient-ms-metabolomics-toolkit.git
+git clone https://github.com/<your-username>/ambient-ms-metabolomics-toolkit.git
 cd ambient-ms-metabolomics-toolkit
 
 # 2. Create environment (conda) or install packages (pip)
@@ -85,8 +86,8 @@ python setup.py
 # 3. Place your data (see Data Format section)
 #    data/<EXPERIMENT>/Group1/sample1.csv  ...
 
-# 4. Set EXPERIMENT in config.py
-#    EXPERIMENT = '<your_experiment_folder>'
+# 4. Set EXPERIMENT in config.json (no Python editing needed)
+#    { "EXPERIMENT": "<your_experiment_folder>" }
 
 # 5. Run
 python -m standard.run_analysis
@@ -94,6 +95,30 @@ python -m standard.run_analysis
 # Optional: additional plots and permutation test
 python -m standard.extras
 ```
+
+---
+
+## Configuration (config.json)
+
+`config.json` in the repository root is the recommended way to set your experiment parameters. Edit it without touching any Python files:
+
+```json
+{
+  "EXPERIMENT": "my_experiment_folder",
+  "MZ_MIN": 100,
+  "MZ_MAX": 1000,
+  "BIN_WIDTH": 0.5,
+  "NORMALIZATION": "tic",
+  "LOG_TRANSFORM": "log10",
+  "SCALING": "autoscale",
+  "RANDOM_SEED": 42,
+  "RUN_PERMUTATION_TEST": true
+}
+```
+
+Only include the keys you want to change — any key absent from `config.json` falls back to the default in `config.py`. See `config.py` for the full list of available parameters and their documentation.
+
+The only required key is `EXPERIMENT`, which must match the name of your experiment folder inside `data/`.
 
 ---
 
@@ -105,12 +130,12 @@ Place experiment data inside `data/<EXPERIMENT_NAME>/`. Each immediate subfolder
 data/
 └── my_experiment/
     ├── Control/
-    │   ├── F11A_A6T1.csv
-    │   ├── F11A_A6T2.csv
-    │   └── F11A_A7T1.csv
+    │   ├── ConditionA_W1T1.csv
+    │   ├── ConditionA_W1T2.csv
+    │   └── ConditionA_W2T1.csv
     └── Treatment/
-        ├── F11B_B3T1.csv
-        └── F11B_B3T2.csv
+        ├── ConditionB_W3T1.csv
+        └── ConditionB_W3T2.csv
 ```
 
 **Supported formats:** `.csv` (comma-separated) or `.txt` (tab-separated).
@@ -122,7 +147,7 @@ data/
 | m/z    | `mz`, `m/z`, `Mass/Charge`, `mass` |
 | Intensity | `int`, `intensity`, `Intensity` |
 
-**Filename convention for biological replicates (GroupKFold):** For the leave-one-replicate-out cross-validation to work correctly, filenames should follow the pattern `<prefix><well>T<replicate>.<ext>`, e.g., `F11A_A6T1.csv`. The pipeline extracts the colony well ID (e.g., `A6`) and builds group labels `condition::well` (e.g., `Control::A6`). Files not matching this pattern fall back to full filename as the group identifier.
+**Filename convention for biological replicates (GroupKFold):** For the leave-one-replicate-out cross-validation to work correctly, filenames should follow the pattern `<prefix><well>T<replicate>.<ext>`, e.g., `ConditionA_W1T1.csv`. The pipeline extracts the well/replicate ID (e.g., `W1`) and builds group labels `condition::well` (e.g., `Control::W1`). Files not matching this pattern fall back to full filename as the group identifier.
 
 ---
 

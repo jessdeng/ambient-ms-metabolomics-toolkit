@@ -1,14 +1,20 @@
 """
 config.py — Pipeline Configuration
 ====================================
-This is the only file you need to edit to customise the pipeline.
-Change the settings below to match your data and research question.
+Default settings for all pipeline parameters. You can override any value by
+editing config.json in the repository root — no Python editing required.
+
+If config.json exists, its values are loaded and applied on top of these
+defaults. Only the keys you want to change need to appear in config.json.
 
 For guidance on which settings to choose, see the README.
 
 Reference: van den Berg et al. (2006) BMC Genomics 7:142
            doi: 10.1186/1471-2164-7-142
 """
+
+import os as _os
+import json as _json
 
 # ── Reproducibility ─────────────────────────────────────────────────────────────
 # Fixed random seed for all stochastic classifiers and cross-validation splits.
@@ -24,7 +30,7 @@ EXPERIMENT = 'your_experiment_folder'   # folder name inside data/
 
 # ── m/z Range ──────────────────────────────────────────────────────────────────
 # Features outside this range are removed before any analysis.
-# Default reflects the informative range for fungal metabolomics on a SCIEX 4500.
+# Default (100–1000 Da) covers the informative range for most small-molecule MS.
 # Adjust to match the range where your instrument produces reliable signal.
 MZ_MIN = 100   # lower m/z cutoff (Da)
 MZ_MAX = 1000  # upper m/z cutoff (Da)
@@ -32,8 +38,9 @@ MZ_MAX = 1000  # upper m/z cutoff (Da)
 
 # ── Binning ────────────────────────────────────────────────────────────────────
 # Groups nearby m/z values into fixed-width windows and sums their intensities.
-# 0.5 Da is appropriate for low-resolution QqQ instruments to account for m/z
-# drift. Use a smaller value (e.g. 0.1) for higher-resolution instruments.
+# 0.5 Da is appropriate for low-resolution instruments (e.g. triple quadrupole)
+# to account for m/z drift. Use a smaller value (e.g. 0.1) for higher-resolution
+# instruments with stable m/z calibration.
 BIN_WIDTH = 0.5  # bin width in Da
 
 
@@ -52,7 +59,7 @@ ABUNDANCE_PERCENTILE = 5  # remove bottom X% of features by abundance (0 = off)
 #   'tic'      — divide each sample by its total ion current (sum of all
 #                intensities) and rescale to the median TIC. The most common
 #                approach for ambient MS and direct infusion experiments.
-#                Default and recommended for LMJ-SSP data.
+#                Default and recommended for most ambient MS workflows.
 #
 #   'median'   — divide each sample by its median feature intensity and rescale
 #                to the global median. More robust than TIC when a small number
@@ -198,3 +205,18 @@ N_PERMUTATIONS = 100
 # The paper reports results for features corroborated by 4 or more methods.
 # Set to 2 to inspect all overlap features.
 HIGH_CONFIDENCE_N_METHODS = 4
+
+
+# ── Load overrides from config.json (if present) ─────────────────────────────
+# Any key in config.json that matches a variable name above will override it.
+# Keys starting with '_' (like "_comment") are ignored.
+_config_json_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'config.json')
+if _os.path.exists(_config_json_path):
+    with open(_config_json_path) as _f:
+        _overrides = _json.load(_f)
+    _g = globals()
+    for _k, _v in _overrides.items():
+        if not _k.startswith('_') and _k in _g:
+            _g[_k] = _v
+    del _g, _k, _v, _f, _overrides
+del _config_json_path, _os, _json
