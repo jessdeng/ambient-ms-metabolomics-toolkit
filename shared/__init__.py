@@ -1,1 +1,1 @@
-# shared package
+# Moved to src/shared/

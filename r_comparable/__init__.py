@@ -1,1 +1,1 @@
-# r_comparable package
+# Moved to src/r_comparable/

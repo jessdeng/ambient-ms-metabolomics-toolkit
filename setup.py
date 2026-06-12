@@ -22,11 +22,11 @@ def install():
     print("  1. Place your experiment folder inside  data/<EXPERIMENT_NAME>/")
     print("  2. Set EXPERIMENT in config.json to match that folder name.")
     print("  3. Run the standard pipeline:")
-    print("       python -m standard.run_analysis")
+    print("       python -m src.standard.run_analysis")
     print("     Or the R-comparable pipeline:")
-    print("       python -m r_comparable.run_analysis")
+    print("       python -m src.r_comparable.run_analysis")
     print("  4. (Optional) Generate additional plots and permutation test:")
-    print("       python -m standard.extras")
+    print("       python -m src.standard.extras")
 
 if __name__ == "__main__":
     install()

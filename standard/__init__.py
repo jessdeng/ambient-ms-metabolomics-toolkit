@@ -1,1 +1,1 @@
-# standard package
+# Moved to src/standard/
