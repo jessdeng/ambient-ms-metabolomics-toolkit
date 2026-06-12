@@ -448,9 +448,17 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     })
 
     print(f"  Adding per-group attribution: mean intensity + Ridge one-vs-rest")
-    if ridge.coef_.shape[0] == 1 and len(classes) == 2:
+    # Normalise ridge.coef_ to shape (n_classes, n_features) in all cases.
+    # Binary sklearn Ridge can return 1D (n_features,) or 2D (1, n_features)
+    # depending on sklearn version; multi-class returns (n_classes, n_features).
+    if ridge.coef_.ndim == 1:
+        # 1D binary: duplicate with sign flip for class 0 / class 1
+        ridge_signed = np.vstack([-ridge.coef_, ridge.coef_])
+    elif ridge.coef_.shape[0] == 1:
+        # 2D binary (1, n_features)
         ridge_signed = np.vstack([-ridge.coef_[0], ridge.coef_[0]])
     else:
+        # Multi-class (n_classes, n_features)
         ridge_signed = ridge.coef_
 
     X_for_means = X_norm if X_norm is not None else X
