@@ -14,7 +14,7 @@ import numpy as np
 
 import config
 from standard.preprocessing import (load_experiment, bin_features,
-    filter_low_variance, filter_low_abundance, preprocess)
+    filter_mass_range, filter_low_variance, filter_low_abundance, preprocess)
 from standard.pipeline import compute_vip_1comp, fit_plsda, plot_scores_3d, plot_vip
 from shared.classifier_comparison_standard import (
     RandomForest, svm_classify, gradient_boosting,
@@ -53,6 +53,13 @@ def main():
     # each fold (no leakage). Binning is per-sample, so it is leak-free here.
     X_binned, mz_binned = bin_features(X_raw, mz, bin_width=config.BIN_WIDTH)
     print(f"\n[2/12] Binning ({config.BIN_WIDTH} Da bins): {X_binned.shape[1]} features")
+
+    # -- 2b. m/z range filter -----------------------------------------------------
+    X_binned, mz_binned = filter_mass_range(
+        X_binned, mz_binned, mz_min=config.MZ_MIN, mz_max=config.MZ_MAX
+    )
+    print(f"  After m/z range filter ({config.MZ_MIN}--{config.MZ_MAX} Da): "
+          f"{X_binned.shape[1]} features")
 
     # -- 3. Filter (FULL-DATA copy -- for the descriptive PLS-DA/VIP/ensemble) --
     # These outputs are reported models fit on all data, so full-data
