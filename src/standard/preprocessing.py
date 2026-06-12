@@ -104,6 +104,79 @@ def bin_features(X, mz, bin_width=0.5):
     return X_binned[:, non_empty], bin_labels[non_empty]
 
 
+def filter_prevalence(X, mz, y_labels, threshold=0.5, min_intensity=0.0):
+    """
+    Remove features not genuinely detected in at least one condition group.
+
+    A sample is considered to have a 'genuine detection' for a feature when its
+    raw intensity is strictly above `min_intensity` (default 0.0). Values at or
+    below this are treated as imputed (e.g. half-minimum filled zeros) and do
+    NOT count toward the prevalence fraction.
+
+    A feature is retained if, in AT LEAST ONE group, the fraction of samples
+    with genuine detection is >= `threshold`.  Features that only survive because
+    of imputed values — even across many samples — are dropped.
+
+    Parameters
+    ----------
+    X : ndarray (n_samples, n_features)
+        Raw (pre-log, pre-scaling) feature matrix, e.g. the binned intensity
+        matrix straight out of bin_features() / filter_mass_range().
+    mz : ndarray (n_features,)
+        m/z value for each feature column.
+    y_labels : array-like (n_samples,)
+        Condition/group label per sample. Must be aligned with X rows.
+    threshold : float
+        Minimum required detection rate within a group (0–1).
+        0.5 = at least 50 % of samples in some group must show real signal.
+        Raise to 0.8 for stricter filtering when you have enough replicates.
+    min_intensity : float
+        Intensity values <= this are treated as not detected / imputed.
+        Default 0.0 (zero-intensity bins = no signal detected).
+
+    Returns
+    -------
+    X_filt   : ndarray (n_samples, n_kept_features)
+    mz_filt  : ndarray (n_kept_features,)
+    """
+    y_labels  = np.asarray(y_labels)
+    groups    = np.unique(y_labels)
+    n_features = X.shape[1]
+
+    # Vectorized detection mask: True wherever raw intensity is genuine signal.
+    # Shape (n_samples, n_features) — computed once, reused for every group.
+    detected = X > min_intensity
+
+    # keep[j] will be set True as soon as feature j passes in any group.
+    keep = np.zeros(n_features, dtype=bool)
+
+    for group in groups:
+        group_mask = (y_labels == group)              # boolean row selector
+
+        # --- Group-wise prevalence check (vectorized) ---
+        # detected[group_mask] has shape (n_group_samples, n_features).
+        # .mean(axis=0) gives the fraction of group samples with real signal
+        # for every feature simultaneously — no Python loop over features.
+        group_prevalence = detected[group_mask].mean(axis=0)   # (n_features,)
+
+        # Feature passes if prevalence reaches the threshold in THIS group.
+        keep |= (group_prevalence >= threshold)
+
+    n_removed = n_features - keep.sum()
+    print(f"  Prevalence filter (>={threshold*100:.0f}% genuine detections "
+          f"in >= 1 group): removed {n_removed} / {n_features} features, "
+          f"{keep.sum()} retained")
+
+    # Per-group breakdown so you can audit which groups are driving retention.
+    for group in groups:
+        group_mask = (y_labels == group)
+        gp = detected[group_mask].mean(axis=0)
+        n_pass = int((gp >= threshold).sum())
+        print(f"    {group}: {n_pass} features reach >={threshold*100:.0f}% detection")
+
+    return X[:, keep], mz[keep]
+
+
 def filter_low_variance(X, mz, percentile=25):
     """
     Remove features with low relative standard deviation (RSD).

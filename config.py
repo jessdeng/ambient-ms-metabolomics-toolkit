@@ -50,6 +50,12 @@ BIN_WIDTH = 0.5  # bin width in Da
 VARIANCE_PERCENTILE = 25  # remove bottom X% of features by variance (0 = off)
 ABUNDANCE_PERCENTILE = 5  # remove bottom X% of features by abundance (0 = off)
 
+# Prevalence filter — removes features driven by imputed (half-min) values.
+# A feature is kept only if it shows genuine detection (raw intensity > 0) in
+# at least this fraction of samples within at least one condition group.
+# 0.5 = 50 % (lenient); 0.8 = 80 % (strict). Set to 0.0 to disable.
+PREVALENCE_THRESHOLD = 0.5
+
 
 # ── Normalization ──────────────────────────────────────────────────────────────
 # Corrects for differences in sample amount, injection volume, or instrument

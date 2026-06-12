@@ -14,7 +14,8 @@ import numpy as np
 
 import config
 from standard.preprocessing import (load_experiment, bin_features,
-    filter_mass_range, filter_low_variance, filter_low_abundance, preprocess)
+    filter_mass_range, filter_prevalence,
+    filter_low_variance, filter_low_abundance, preprocess)
 from standard.pipeline import compute_vip_1comp, fit_plsda, plot_scores_3d, plot_vip
 from shared.classifier_comparison_standard import (
     RandomForest, svm_classify, gradient_boosting,
@@ -60,6 +61,16 @@ def main():
     )
     print(f"  After m/z range filter ({config.MZ_MIN}--{config.MZ_MAX} Da): "
           f"{X_binned.shape[1]} features")
+
+    # -- 2c. Prevalence filter (applied to raw binned matrix) ---------------------
+    # Drops features that only survive due to half-min imputation.
+    # Must run on the raw counts BEFORE any log-transform so that zeros are
+    # still zeros and the 'detected vs imputed' distinction is preserved.
+    if config.PREVALENCE_THRESHOLD > 0.0:
+        X_binned, mz_binned = filter_prevalence(
+            X_binned, mz_binned, y_labels,
+            threshold=config.PREVALENCE_THRESHOLD,
+        )
 
     # -- 3. Filter (FULL-DATA copy -- for the descriptive PLS-DA/VIP/ensemble) --
     # These outputs are reported models fit on all data, so full-data
