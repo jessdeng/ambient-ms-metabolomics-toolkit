@@ -1,8 +1,13 @@
 # Data — never commit raw mass spec files
 data/
+!data/.gitkeep
+!data/README.md
 
 # Results — generated outputs; reproducible from data + code
 results/
+!results/README.md
+!results/standard/.gitkeep
+!results/r_comparable/.gitkeep
 
 # Python byte-compiled / optimized / DLL files
 __pycache__/
