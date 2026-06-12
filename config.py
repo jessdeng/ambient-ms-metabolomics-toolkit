@@ -10,10 +10,16 @@ Reference: van den Berg et al. (2006) BMC Genomics 7:142
            doi: 10.1186/1471-2164-7-142
 """
 
+# ── Reproducibility ─────────────────────────────────────────────────────────────
+# Fixed random seed for all stochastic classifiers and cross-validation splits.
+# Keep this value to reproduce paper results exactly. Change it (e.g. to 0 or 99)
+# to verify that findings are robust across seeds — results should be similar.
+RANDOM_SEED = 42
+
 # ── Experiment ─────────────────────────────────────────────────────────────────
 # The name of your experiment folder. Must be in the same directory as the
 # .py files. Include spaces and special characters exactly as they appear.
-EXPERIMENT = 'your_experiment_folder'
+EXPERIMENT = 'your_experiment_folder'   # folder name inside data/
 
 
 # ── m/z Range ──────────────────────────────────────────────────────────────────
@@ -183,5 +189,12 @@ VIP_FILTER_THRESHOLD = 1.0  # keep features with VIP > this value
 # classification accuracy is significantly above chance. The most rigorous
 # validation for small MS datasets. Slow — allow ~2-5 minutes.
 # p < 0.05 confirms the model is learning real signal, not memorising noise.
-RUN_PERMUTATION_TEST = False
+RUN_PERMUTATION_TEST = True   # set False to skip (saves ~2–5 min)
 N_PERMUTATIONS = 100
+
+# ── Ensemble confidence threshold ────────────────────────────────────────────────
+# Features with n_methods >= this value are reported as "high confidence" by
+# condition_abundance.py and condition_spectrum.py.
+# The paper reports results for features corroborated by 4 or more methods.
+# Set to 2 to inspect all overlap features.
+HIGH_CONFIDENCE_N_METHODS = 4

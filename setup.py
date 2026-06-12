@@ -18,8 +18,15 @@ def install():
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
     print("\n[ok] Setup complete!")
-    print("\nNext step: open run_analysis.py, set your EXPERIMENT folder name, then run:")
-    print("  python run_analysis.py")
+    print("\nNext steps:")
+    print("  1. Place your experiment folder inside  data/<EXPERIMENT_NAME>/")
+    print("  2. Set EXPERIMENT in config.py to match that folder name.")
+    print("  3. Run the standard pipeline:")
+    print("       python -m standard.run_analysis")
+    print("     Or the R-comparable pipeline:")
+    print("       python -m r_comparable.run_analysis")
+    print("  4. (Optional) Generate additional plots and permutation test:")
+    print("       python -m standard.extras")
 
 if __name__ == "__main__":
     install()

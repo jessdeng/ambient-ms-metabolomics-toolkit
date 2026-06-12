@@ -27,11 +27,11 @@ import config
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 PIPELINE      = 'standard'    # 'standard' or 'r_comparable'
-MIN_N_METHODS = 4             # minimum ensemble count to include
+MIN_N_METHODS = config.HIGH_CONFIDENCE_N_METHODS   # set in config.py
 # ──────────────────────────────────────────────────────────────────────────────
 
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUTPUT_DIR = os.path.join(BASE_DIR, f'output_{PIPELINE}')
+OUTPUT_DIR = os.path.join(BASE_DIR, 'results', PIPELINE)
 
 
 def main():
@@ -140,6 +140,7 @@ def main():
 
     plt.tight_layout()
     plot_path = os.path.join(OUTPUT_DIR, f'condition_abundance_{safe_name}.png')
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     plt.savefig(plot_path, dpi=180, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f"\nSaved plot → {plot_path}")

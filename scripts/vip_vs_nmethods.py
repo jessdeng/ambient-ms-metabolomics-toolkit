@@ -29,10 +29,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-# Change to 'output_r_comparable' if you ran the R-comparable pipeline
-OUTPUT_DIR   = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             'output_standard')
-MIN_N_LABEL  = 4    # label features with this many methods or more on the plot
+# Change to 'r_comparable' if you ran the R-comparable pipeline
+PIPELINE    = 'standard'
+OUTPUT_DIR  = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'results', PIPELINE)
+MIN_N_LABEL = config.HIGH_CONFIDENCE_N_METHODS   # set in config.py
 # ──────────────────────────────────────────────────────────────────────────────
 
 
