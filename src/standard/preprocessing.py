@@ -1,280 +1,228 @@
 """
-standard/preprocessing.py — Data Loading and Preprocessing
-============================================================
-Loads raw ambient MS data from per-group CSV/TXT files, bins features into
-fixed-width m/z windows (bin labels = mean m/z of actual values in bin),
-and applies the configurable normalization → transformation → scaling chain.
+Preprocessing functions for mass spectrometry data — standard version.
 
-Usage:
-    from standard.preprocessing import (
-        load_experiment, bin_features, filter_mass_range,
-        filter_low_variance, filter_low_abundance, preprocess
-    )
+This is a drop-in replacement for preprocessing.py with one difference:
+bin_features() labels each bin at its true geometric center (bin_edge + bin_width/2)
+rather than applying MetaboAnalyst's -0.05 Da cosmetic offset.
+
+Use this version when MetaboAnalyst validation is not the goal.
+Use preprocessing.py when you need output labels to match MetaboAnalyst exactly.
 """
 
 import os
+import glob
 import numpy as np
 import pandas as pd
 
 
-# ── File loading ───────────────────────────────────────────────────────────────
-
-def _read_sample(path):
-    """Read one CSV or TXT sample file. Returns (mz_array, intensity_array)."""
-    ext = os.path.splitext(path)[1].lower()
-    sep = ',' if ext == '.csv' else '\t'
-    df = pd.read_csv(path, sep=sep, engine='python')
-
-    # Normalise column names
-    df.columns = [c.strip().lower().replace('/', '').replace(' ', '') for c in df.columns]
-
-    # Locate m/z column
-    mz_candidates = ['mz', 'masscharge', 'moverz', 'mass']
-    mz_col = next((c for c in mz_candidates if c in df.columns), None)
-    if mz_col is None:
-        raise ValueError(
-            f"Could not find m/z column in {path}. "
-            f"Expected one of: mz, Mass/Charge. Found: {list(df.columns)}"
-        )
-
-    # Locate intensity column
-    int_candidates = ['int', 'intensity', 'intensities', 'abundance']
-    int_col = next((c for c in int_candidates if c in df.columns), None)
-    if int_col is None:
-        raise ValueError(
-            f"Could not find intensity column in {path}. "
-            f"Expected one of: int, Intensity. Found: {list(df.columns)}"
-        )
-
-    mz  = df[mz_col].astype(float).values
-    ints = df[int_col].astype(float).values
-    return mz, ints
-
-
 def load_experiment(experiment_dir):
     """
-    Load all samples from an experiment directory.
-
-    Directory structure:
-        experiment_dir/
-            Group1/
-                sample1.csv
-                sample2.csv
-            Group2/
-                ...
-
-    Returns
-    -------
-    X_raw        : ndarray (n_samples, n_features)  — intensity matrix
-    y_labels     : ndarray of str                   — group label per sample
-    sample_names : list of str                      — filename per sample
-    mz           : ndarray                          — common m/z axis
+    Read all CSVs and TXTs from the experiment folder.
+    Each direct subfolder = one class/group.
+    Each CSV/TXT inside = one sample.
+    Interpolates all samples onto a common m/z axis.
+    Returns X (n_samples × n_features), labels array, sample names, mz axis.
     """
-    groups = sorted([
+    samples, labels, names = [], [], []
+    raw_mz_list = []
+
+    group_folders = sorted([
         d for d in os.listdir(experiment_dir)
-        if os.path.isdir(os.path.join(experiment_dir, d)) and not d.startswith('.')
+        if os.path.isdir(os.path.join(experiment_dir, d))
     ])
-    if not groups:
-        raise ValueError(f"No group subfolders found in {experiment_dir!r}")
 
-    all_mz, all_ints, all_labels, all_names = [], [], [], []
+    for group in group_folders:
+        data_files = sorted(
+            glob.glob(os.path.join(experiment_dir, group, '*.csv')) +
+            glob.glob(os.path.join(experiment_dir, group, '*.txt'))
+        )
+        if not data_files:
+            print(f"  [warning] No CSV or TXT files in '{group}', skipping.")
+            continue
 
-    for group in groups:
-        group_dir = os.path.join(experiment_dir, group)
-        files = sorted([
-            f for f in os.listdir(group_dir)
-            if f.lower().endswith(('.csv', '.txt')) and not f.startswith('.')
-        ])
-        for fname in files:
-            mz, ints = _read_sample(os.path.join(group_dir, fname))
-            all_mz.append(mz)
-            all_ints.append(ints)
-            all_labels.append(group)
-            all_names.append(fname)
+        for file_path in data_files:
+            sep = '\t' if file_path.endswith('.txt') else ','
+            df = pd.read_csv(file_path, sep=sep, encoding='utf-8-sig')
+            df.columns = df.columns.str.lstrip('﻿').str.strip()
+            col_map = {c.lower(): c for c in df.columns}
+            col_map['mz'] = col_map.get('mz') or col_map.get('mass/charge')
+            col_map['int'] = col_map.get('int') or col_map.get('intensity')
 
-    # Build a common m/z axis (union of all sample m/z values, sorted)
-    common_mz = np.unique(np.concatenate(all_mz))
+            if col_map['mz'] is None or col_map['int'] is None:
+                print(f"  [warning] Skipping {os.path.basename(file_path)}: "
+                      f"could not find m/z or intensity columns. "
+                      f"Found: {list(df.columns)}")
+                continue
 
-    # Align every sample onto the common axis
-    n_samples  = len(all_ints)
-    n_features = len(common_mz)
-    X_raw = np.zeros((n_samples, n_features), dtype=float)
+            raw_mz_list.append(df[col_map['mz']].values)
+            samples.append(df[col_map['int']].values)
+            labels.append(group.strip())
+            names.append(os.path.basename(file_path))
 
-    for i, (mz, ints) in enumerate(zip(all_mz, all_ints)):
-        idx = np.searchsorted(common_mz, mz)
-        # Only write positions that land within bounds (guards against float drift)
-        valid = (idx < n_features) & (common_mz[np.clip(idx, 0, n_features - 1)] == mz)
-        X_raw[i, idx[valid]] = ints[valid]
+    # Build a common m/z axis covering the overlap range across all files
+    mz_min = max(mz.min() for mz in raw_mz_list)
+    mz_max = min(mz.max() for mz in raw_mz_list)
+    common_mz = np.linspace(mz_min, mz_max, num=5000)
 
-    return X_raw, np.array(all_labels), all_names, common_mz
+    # Interpolate every sample onto the common axis
+    interpolated = []
+    for mz_i, int_i in zip(raw_mz_list, samples):
+        interp_int = np.interp(common_mz, mz_i, int_i)
+        interpolated.append(interp_int)
 
+    return np.array(interpolated, dtype=float), np.array(labels), names, common_mz
 
-# ── Binning ────────────────────────────────────────────────────────────────────
+def filter_mass_range(X, mz, mz_min=100, mz_max=1000):
+    keep = (mz >= mz_min) & (mz <= mz_max)
+    return X[:, keep], mz[keep]
 
 def bin_features(X, mz, bin_width=0.5):
     """
-    Aggregate features into fixed-width m/z bins by summing intensities.
+    Bin m/z features into fixed-width bins by summing intensities.
+    Each bin is labeled with the mean of the actual m/z values that fell into it —
+    i.e. where the signal genuinely was, not an arithmetic midpoint.
 
-    Standard version: bin labels are the **mean of actual m/z values** within
-    each bin — use these for accurate database lookup.
-
-    Parameters
-    ----------
-    X         : ndarray (n_samples, n_features)
-    mz        : ndarray (n_features,)
-    bin_width : float — width of each bin in Da
-
-    Returns
-    -------
-    X_binned  : ndarray (n_samples, n_bins)
-    mz_binned : ndarray (n_bins,)  — mean m/z per bin
+    This differs from preprocessing.py, which labels bins at a fixed arithmetic
+    center shifted by -0.05 Da to match MetaboAnalyst's output convention.
+    That label has no physical meaning. This version gives you the real m/z.
     """
-    mz_min  = np.floor(mz.min() / bin_width) * bin_width
-    mz_max  = np.ceil(mz.max()  / bin_width) * bin_width
-    edges   = np.arange(mz_min, mz_max + bin_width, bin_width)
-    bin_idx = np.digitize(mz, edges) - 1   # 0-indexed
+    bin_edges = np.arange(mz.min(), mz.max() + bin_width, bin_width)
 
-    n_bins    = len(edges) - 1
-    X_binned  = np.zeros((X.shape[0], n_bins), dtype=float)
-    mz_binned = np.zeros(n_bins, dtype=float)
+    n_bins = len(bin_edges) - 1
+    X_binned  = np.zeros((X.shape[0], n_bins))
+    bin_labels = np.zeros(n_bins)
 
-    for b in range(n_bins):
-        mask = bin_idx == b
+    for i, (low, high) in enumerate(zip(bin_edges[:-1], bin_edges[1:])):
+        mask = (mz >= low) & (mz < high)
         if mask.any():
-            X_binned[:, b] = X[:, mask].sum(axis=1)
-            mz_binned[b]   = mz[mask].mean()       # mean of actual m/z values
+            X_binned[:, i]  = X[:, mask].sum(axis=1)
+            bin_labels[i]   = mz[mask].mean()   # mean of actual m/z values in this bin
         else:
-            mz_binned[b] = edges[b] + bin_width / 2.0
+            bin_labels[i]   = (low + high) / 2  # fallback for empty bins
 
-    # Drop bins with no data
-    has_data  = mz_binned > 0
-    X_binned  = X_binned[:, has_data]
-    mz_binned = mz_binned[has_data]
+    non_empty = X_binned.sum(axis=0) > 0
+    return X_binned[:, non_empty], bin_labels[non_empty]
 
-    return X_binned, mz_binned
-
-
-# ── Range filter ───────────────────────────────────────────────────────────────
-
-def filter_mass_range(X, mz, mz_min=100, mz_max=1000):
-    """
-    Remove features outside [mz_min, mz_max].
-
-    Returns X_filtered, mz_filtered.
-    """
-    mask = (mz >= mz_min) & (mz <= mz_max)
-    return X[:, mask], mz[mask]
-
-
-# ── Feature-level filters ──────────────────────────────────────────────────────
 
 def filter_low_variance(X, mz, percentile=25):
     """
-    Remove features in the bottom `percentile` by relative standard deviation
-    (RSD = std / mean). Set percentile=0 to disable.
+    Remove features with low relative standard deviation (RSD).
+    Matches MetaboAnalyst's 'Interquartile range' filter at 25%.
     """
-    if percentile <= 0:
-        return X, mz
-    mean = X.mean(axis=0)
-    mean[mean == 0] = 1e-12
-    rsd  = X.std(axis=0) / mean
-    keep = rsd > np.percentile(rsd, percentile)
+    rsd = X.std(axis=0) / X.mean(axis=0)
+    threshold = np.percentile(rsd, percentile)
+    keep = rsd > threshold
     return X[:, keep], mz[keep]
 
 
 def filter_low_abundance(X, mz, percentile=5):
     """
-    Remove features in the bottom `percentile` by mean intensity.
-    Set percentile=0 to disable.
+    Remove features with low mean intensity.
+    Uses mean (not median) and 5% cutoff to match MetaboAnalyst.
     """
-    if percentile <= 0:
-        return X, mz
-    m    = X.mean(axis=0)
-    keep = m > np.percentile(m, percentile)
+    mean_intensity = np.mean(X, axis=0)
+    threshold = np.percentile(mean_intensity, percentile)
+    keep = mean_intensity > threshold
     return X[:, keep], mz[keep]
-
-
-# ── Preprocessing chain ────────────────────────────────────────────────────────
-
-def _normalize(X, method):
-    """Sample-level normalisation (operates row-wise)."""
-    X = X.astype(float)
-    if method == 'none':
-        return X
-    if method == 'tic':
-        rs = X.sum(axis=1, keepdims=True)
-        rs[rs == 0] = 1
-        median_tic = np.median(X.sum(axis=1))
-        return X / rs * median_tic
-    if method == 'median':
-        rm = np.median(X, axis=1, keepdims=True)
-        rm[rm == 0] = 1
-        global_median = np.median(np.median(X, axis=1))
-        return X / rm * global_median
-    if method == 'pqn':
-        rs  = X.sum(axis=1, keepdims=True); rs[rs == 0] = 1
-        Xn  = X / rs
-        ref = np.median(Xn, axis=0); ref[ref == 0] = 1
-        q   = Xn / ref
-        d   = np.median(q, axis=1, keepdims=True); d[d == 0] = 1
-        return Xn / d
-    if method == 'quantile':
-        sorted_means = np.sort(X, axis=1).mean(axis=0)
-        ranks = np.argsort(np.argsort(X, axis=1), axis=1)
-        return sorted_means[ranks]
-    raise ValueError(f"Unknown normalization: '{method}'")
-
-
-def _transform(X, method):
-    """Feature-level transformation (log, sqrt, etc.)."""
-    X = X.astype(float)
-    if method == 'none':
-        return X
-    # Half-minimum pseudo-count avoids log(0)
-    pos = X[X > 0]
-    half = pos.min() / 2 if pos.size else 1e-6
-    if method == 'log10':
-        return np.log10(X + half)
-    if method == 'log2':
-        return np.log2(X + half)
-    if method == 'sqrt':
-        return np.sqrt(X)
-    raise ValueError(f"Unknown log_transform: '{method}'")
-
-
-def _scale(X, method):
-    """Feature-level scaling (operates column-wise)."""
-    X = X.astype(float)
-    if method == 'none':
-        return X
-    mean = X.mean(axis=0)
-    std  = X.std(axis=0, ddof=1)
-    std[std == 0] = 1
-    if method == 'autoscale':
-        return (X - mean) / std
-    if method == 'pareto':
-        return (X - mean) / np.sqrt(std)
-    if method == 'range':
-        rng = X.max(axis=0) - X.min(axis=0)
-        rng[rng == 0] = 1
-        return (X - mean) / rng
-    if method == 'vast':
-        return ((X - mean) / std) * (mean / (std + 1e-10))
-    if method == 'level':
-        lvl = np.abs(mean); lvl[lvl == 0] = 1
-        return (X - mean) / lvl
-    raise ValueError(f"Unknown scaling: '{method}'")
 
 
 def preprocess(X, normalization='tic', log_transform='log10', scaling='autoscale'):
     """
-    Apply the full preprocessing chain in order:
-        normalise → transform → scale
+    Normalize, transform, and scale the data.
 
-    Parameters mirror config.py settings. Operates in-place on a copy — pass
-    X.copy() if you need the original unchanged.
+    Parameters
+    ----------
+    normalization : str
+        Sample normalization method. Options: 'tic', 'median', 'pqn', 'quantile', 'none'.
+        See Wu & Li (2016) Sci Rep 6:38881 for a comparison of methods.
+    log_transform : str
+        Transformation to apply. Options: 'log10', 'log2', 'sqrt', 'none'.
+    scaling : str
+        Scaling method. Options: 'autoscale', 'pareto', 'range', 'vast', 'level', 'none'.
+        See van den Berg et al. (2006) BMC Genomics 7:142 for guidance.
     """
-    X = _normalize(X, normalization)
-    X = _transform(X, log_transform)
-    X = _scale(X, scaling)
+
+    # -- Normalization -----------------------------------------------------------
+    if normalization == 'tic':
+        row_sums = X.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1
+        X = X / row_sums * np.median(row_sums)
+
+    elif normalization == 'median':
+        row_medians = np.median(X, axis=1, keepdims=True)
+        row_medians[row_medians == 0] = 1
+        X = X / row_medians * np.median(row_medians)
+
+    elif normalization == 'pqn':
+        # Probabilistic Quotient Normalization
+        # Reference: Dieterle et al. (2006) Anal Chem 78:4281
+        # 1. TIC-normalize first as a preliminary step
+        row_sums = X.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1
+        X_tic = X / row_sums
+        # 2. Reference spectrum = median of all TIC-normalized samples
+        reference = np.median(X_tic, axis=0)
+        reference[reference == 0] = 1
+        # 3. Quotients = each sample divided by reference
+        quotients = X_tic / reference
+        # 4. Dilution factor = median of quotients per sample
+        dilution = np.median(quotients, axis=1, keepdims=True)
+        dilution[dilution == 0] = 1
+        X = X_tic / dilution
+
+    elif normalization == 'quantile':
+        # Quantile normalization: force all samples to same distribution
+        ranks = np.argsort(np.argsort(X, axis=1), axis=1)
+        sorted_X = np.sort(X, axis=1)
+        row_means = sorted_X.mean(axis=0)
+        X = row_means[ranks]
+
+    elif normalization == 'none':
+        pass
+
+    else:
+        raise ValueError(f"Unknown normalization: '{normalization}'. "
+                         f"Choose from: 'tic', 'median', 'pqn', 'quantile', 'none'.")
+
+    # -- Transformation ----------------------------------------------------------
+    min_positive = X[X > 0].min() if (X > 0).any() else 1e-6
+    half_min = min_positive / 2
+
+    if log_transform == 'log10':
+        X = np.log10(X + half_min)
+    elif log_transform == 'log2':
+        X = np.log2(X + half_min)
+    elif log_transform == 'sqrt':
+        X = np.sqrt(X)
+    elif log_transform == 'none':
+        pass
+    else:
+        raise ValueError(f"Unknown log_transform: '{log_transform}'. "
+                         f"Choose from: 'log10', 'log2', 'sqrt', 'none'.")
+
+    # -- Scaling -----------------------------------------------------------------
+    feat_mean = X.mean(axis=0)
+    feat_std  = X.std(axis=0, ddof=1)
+    feat_std[feat_std == 0] = 1
+
+    if scaling == 'autoscale':
+        X = (X - feat_mean) / feat_std
+    elif scaling == 'pareto':
+        X = (X - feat_mean) / np.sqrt(feat_std)
+    elif scaling == 'range':
+        feat_range = X.max(axis=0) - X.min(axis=0)
+        feat_range[feat_range == 0] = 1
+        X = (X - feat_mean) / feat_range
+    elif scaling == 'vast':
+        X = ((X - feat_mean) / feat_std) * (feat_mean / (feat_std + 1e-10))
+    elif scaling == 'level':
+        level = np.abs(feat_mean)
+        level[level == 0] = 1
+        X = (X - feat_mean) / level
+    elif scaling == 'none':
+        X = X - feat_mean
+    else:
+        raise ValueError(f"Unknown scaling: '{scaling}'. "
+                         f"Choose from: 'autoscale', 'pareto', 'range', 'vast', 'level', 'none'.")
+
     return X

@@ -1,360 +1,130 @@
+import os
 """
-Classifier Comparison for Mass Spectrometry Metabolomics Data (R-comparable pipeline)
-======================================================================================
-Trains and evaluates 6 supervised classifiers using leave-one-biological-replicate-out
-cross-validation (StratifiedGroupKFold), with all preprocessing fit inside each fold
-to eliminate data leakage.
+Classifier Comparison for Mass Spectrometry Metabolomics Data
+=============================================================
+Trains and evaluates 7 supervised classifiers using 5-fold stratified
+cross-validation, then plots per-fold accuracy, mean accuracy, and a
+train vs test comparison to flag potential overfitting.
 
-Methodological design
----------------------
-(1) Pseudoreplication fix.  Technical replicates (T1/T2/T3) of the same colony are
-    NOT independent observations. Cross-validation uses StratifiedGroupKFold with the
-    colony (condition × well) as the grouping unit, so a colony's replicates are always
-    on the same side of every fold boundary. This gives a leave-one-biological-replicate-
-    out estimate of generalisation rather than an inflated within-replicate estimate.
-
-(2) Preprocessing leakage fix.  Variance/abundance filtering, normalisation,
-    log-transformation and scaling are encapsulated in an sklearn Pipeline fitted
-    exclusively on the training fold inside each CV iteration. Test-fold data never
-    influences feature selection or scaling parameters.
-
-Note on feature_importance_analysis(): the ensemble feature ranking is a descriptive
-model fit on all data (the final candidate list), not a generalisation estimate, so
-full-data preprocessing is intentional and correct there.
-
-Classifiers used for accuracy evaluation:
-    Random Forest, SVM (linear), Gradient Boosting, Logistic Regression, LDA, Ridge
-
-Classifiers used for ensemble feature importance (n_methods count):
-    Random Forest, SVM, Gradient Boosting, Logistic Regression, Ridge, PLS-DA VIP
-    (LDA excluded — no comparable feature-level importance measure)
+Classifiers:
+    - Random Forest
+    - Support Vector Machine (linear kernel)
+    - Gradient Boosting
+    - Logistic Regression
+    - Linear Discriminant Analysis
+    - Ridge Regression
 
 Usage:
-    python -m r_comparable.run_analysis
+    python run_analysis.py
 """
-
-import os
-import sys
-import warnings
-import re
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
-
 from collections import Counter
 
-from sklearn.base import BaseEstimator, TransformerMixin, clone
-from sklearn.pipeline import Pipeline
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold, cross_validate
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import accuracy_score
 
 from r_comparable.pipeline import compute_vip_1comp
 
 
-# ── Preprocessing transformers (train-fit only; mirror preprocessing.preprocess) ─
+# -- Shared cross-validation runner --------------------------------------------
 
-class VarianceFilter(BaseEstimator, TransformerMixin):
-    """Remove features with low relative standard deviation (RSD)."""
-    def __init__(self, percentile=25):
-        self.percentile = percentile
-    def fit(self, X, y=None):
-        if self.percentile <= 0:
-            self.keep_ = np.ones(X.shape[1], dtype=bool)
-            return self
-        mean = X.mean(axis=0).copy()
-        mean[mean == 0] = 1e-12
-        rsd = X.std(axis=0) / mean
-        self.keep_ = rsd > np.percentile(rsd, self.percentile)
-        return self
-    def transform(self, X):
-        return X[:, self.keep_]
-
-
-class AbundanceFilter(BaseEstimator, TransformerMixin):
-    """Remove features with low mean intensity."""
-    def __init__(self, percentile=5):
-        self.percentile = percentile
-    def fit(self, X, y=None):
-        if self.percentile <= 0:
-            self.keep_ = np.ones(X.shape[1], dtype=bool)
-            return self
-        m = X.mean(axis=0)
-        self.keep_ = m > np.percentile(m, self.percentile)
-        return self
-    def transform(self, X):
-        return X[:, self.keep_]
-
-
-class Normalizer(BaseEstimator, TransformerMixin):
-    """Sample normalisation: 'tic', 'median', 'pqn', 'quantile', 'none'."""
-    def __init__(self, method='tic'):
-        self.method = method
-    def fit(self, X, y=None):
-        if self.method == 'tic':
-            self.const_ = np.median(X.sum(axis=1, keepdims=True))
-        elif self.method == 'median':
-            self.const_ = np.median(np.median(X, axis=1, keepdims=True))
-        elif self.method == 'pqn':
-            rs = X.sum(axis=1, keepdims=True); rs[rs == 0] = 1
-            ref = np.median(X / rs, axis=0); ref[ref == 0] = 1
-            self.ref_ = ref
-        elif self.method == 'quantile':
-            self.row_means_ = np.sort(X, axis=1).mean(axis=0)
-        elif self.method == 'none':
-            pass
-        else:
-            raise ValueError(f"Unknown normalization: '{self.method}'")
-        return self
-    def transform(self, X):
-        X = X.astype(float)
-        if self.method == 'tic':
-            rs = X.sum(axis=1, keepdims=True); rs[rs == 0] = 1
-            return X / rs * self.const_
-        if self.method == 'median':
-            rm = np.median(X, axis=1, keepdims=True); rm[rm == 0] = 1
-            return X / rm * self.const_
-        if self.method == 'pqn':
-            rs = X.sum(axis=1, keepdims=True); rs[rs == 0] = 1
-            Xt = X / rs
-            q = Xt / self.ref_
-            d = np.median(q, axis=1, keepdims=True); d[d == 0] = 1
-            return Xt / d
-        if self.method == 'quantile':
-            ranks = np.argsort(np.argsort(X, axis=1), axis=1)
-            return self.row_means_[ranks]
-        return X
-
-
-class LogTransform(BaseEstimator, TransformerMixin):
-    """Transformation: 'log10', 'log2', 'sqrt', 'none'."""
-    def __init__(self, method='log10'):
-        self.method = method
-    def fit(self, X, y=None):
-        mp = X[X > 0].min() if (X > 0).any() else 1e-6
-        self.half_ = mp / 2
-        return self
-    def transform(self, X):
-        if self.method == 'log10':
-            return np.log10(X + self.half_)
-        if self.method == 'log2':
-            return np.log2(X + self.half_)
-        if self.method == 'sqrt':
-            return np.sqrt(X)
-        if self.method == 'none':
-            return X
-        raise ValueError(f"Unknown log_transform: '{self.method}'")
-
-
-class Scaler(BaseEstimator, TransformerMixin):
-    """Scaling: 'autoscale', 'pareto', 'range', 'vast', 'level', 'none'."""
-    def __init__(self, method='autoscale'):
-        self.method = method
-    def fit(self, X, y=None):
-        self.mean_ = X.mean(axis=0)
-        self.std_ = X.std(axis=0, ddof=1)
-        self.std_[self.std_ == 0] = 1
-        if self.method == 'range':
-            self.range_ = X.max(axis=0) - X.min(axis=0)
-            self.range_[self.range_ == 0] = 1
-        return self
-    def transform(self, X):
-        m = self.mean_
-        if self.method == 'autoscale':
-            return (X - m) / self.std_
-        if self.method == 'pareto':
-            return (X - m) / np.sqrt(self.std_)
-        if self.method == 'range':
-            return (X - m) / self.range_
-        if self.method == 'vast':
-            return ((X - m) / self.std_) * (m / (self.std_ + 1e-10))
-        if self.method == 'level':
-            lvl = np.abs(m); lvl[lvl == 0] = 1
-            return (X - m) / lvl
-        if self.method == 'none':
-            return X - m
-        raise ValueError(f"Unknown scaling: '{self.method}'")
-
-
-# ── Grouping + preprocessor helpers ───────────────────────────────────────────
-
-def make_groups(y_labels, names):
+def _run_cv(model_fn, X, y, n_splits=5, random_state=42):
     """
-    Build a per-sample group label so that technical replicates of one colony
-    share a group and never split across CV folds.
-
-    group = '<condition>::<well>'  e.g.  'ConditionA::W1'
-
-    Parsed from the filename token immediately before T<n> (e.g. W1T2 → W1).
-    Falls back to the full filename if the pattern is absent.
+    Run stratified k-fold CV for any model.
+    Returns (test_accs, train_accs) as numpy arrays.
+    model_fn: callable that returns a fresh unfitted model instance.
     """
-    groups = []
-    for lab, nm in zip(y_labels, names):
-        m = re.search(r'([A-Za-z]\d+)[Tt]\d+\.(?:csv|txt)$', str(nm))
-        groups.append(f"{lab}::{m.group(1)}" if m else f"{lab}::{nm}")
-    return np.array(groups)
-
-
-def make_preprocessor(normalization='tic', log_transform='log10',
-                      scaling='autoscale', variance_percentile=25,
-                      abundance_percentile=5):
-    """
-    Return ordered (name, transformer) steps that reproduce the preprocessing
-    chain. Order: variance filter → abundance filter → normalise → transform → scale.
-    """
-    return [
-        ('variance',  VarianceFilter(variance_percentile)),
-        ('abundance', AbundanceFilter(abundance_percentile)),
-        ('normalize', Normalizer(normalization)),
-        ('logtrans',  LogTransform(log_transform)),
-        ('scale',     Scaler(scaling)),
-    ]
-
-
-def auto_n_splits(y_labels, groups, desired=5):
-    """
-    Largest fold count compatible with the grouping. With g biological replicates
-    per class, StratifiedGroupKFold needs n_splits <= g; with 3 replicates per
-    class this returns 3 (leave-one-replicate-out).
-    """
-    y_labels = np.asarray(y_labels)
-    per_class = [len(set(groups[y_labels == c])) for c in np.unique(y_labels)]
-    return int(max(2, min(desired, min(per_class))))
-
-
-# ── Cross-validation runners ───────────────────────────────────────────────────
-
-def _encode(y_labels):
-    return LabelEncoder().fit_transform(y_labels)
-
-
-def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits):
-    """
-    Leak-free, group-aware CV. X_binned is the m/z-filtered binned matrix BEFORE
-    any filtering/normalisation/scaling. The preprocessor Pipeline is cloned and
-    fit inside each fold. Returns (test_accs, train_accs).
-    """
-    steps = [(name, clone(t)) for name, t in prep_steps] + [('clf', clone(estimator))]
-    pipe = Pipeline(steps)
-    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
-                                random_state=config.RANDOM_SEED)
-    res = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
-                         scoring='accuracy', return_train_score=True)
-    return res['test_score'], res['train_score']
-
-
-def _run_cv_legacy(model_fn, X, y, n_splits=5):
-    """Original ungrouped CV on an already-preprocessed X.
-    Kept only for backward compatibility — reintroduces leakage and
-    pseudoreplication. Prefer _run_grouped_cv for all new code."""
-    cv = StratifiedKFold(n_splits=n_splits, shuffle=True,
-                         random_state=config.RANDOM_SEED)
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     test_accs, train_accs = [], []
+
     for train_idx, test_idx in cv.split(X, y):
+        X_tr, X_te = X[train_idx], X[test_idx]
+        y_tr, y_te = y[train_idx], y[test_idx]
+
         model = model_fn()
-        model.fit(X[train_idx], y[train_idx])
-        train_accs.append(accuracy_score(y[train_idx], model.predict(X[train_idx])))
-        test_accs.append(accuracy_score(y[test_idx], model.predict(X[test_idx])))
+        model.fit(X_tr, y_tr)
+
+        train_accs.append(accuracy_score(y_tr, model.predict(X_tr)))
+        test_accs.append(accuracy_score(y_te, model.predict(X_te)))
+
     return np.array(test_accs), np.array(train_accs)
 
 
-def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps):
-    """Use corrected grouped/leak-free CV when groups+prep_steps are supplied;
-    otherwise warn and fall back to legacy path."""
-    if groups is not None and prep_steps is not None:
-        return _run_grouped_cv(estimator, X, y, groups, prep_steps, n_splits)
-    warnings.warn(
-        "Running LEGACY ungrouped CV on pre-preprocessed X. This reintroduces "
-        "pseudoreplication and preprocessing leakage. Pass groups= and "
-        "prep_steps= (with the binned matrix as X) for corrected estimates.",
-        stacklevel=2)
-    return _run_cv_legacy(legacy_fn, X, y, n_splits)
+def _encode(y_labels):
+    le = LabelEncoder()
+    return le.fit_transform(y_labels)
 
 
-# ── Individual classifiers ─────────────────────────────────────────────────────
-# New signature: pass the m/z-filtered BINNED matrix as X, plus groups= and prep_steps=.
+# -- Individual classifiers ----------------------------------------------------
 
-def random_forest(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                  random_state=None):
-    if random_state is None:
-        random_state = config.RANDOM_SEED
+def RandomForest(X, y_labels, n_splits=5, random_state=42):
     y = _encode(y_labels)
-    est = RandomForestClassifier(n_estimators=100, random_state=random_state)
-    return _dispatch(est,
-                     lambda: RandomForestClassifier(n_estimators=100,
-                                                    random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+    return _run_cv(
+        lambda: RandomForestClassifier(n_estimators=100, random_state=random_state),
+        X, y, n_splits, random_state
+    )
 
 
-def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                 random_state=None):
-    if random_state is None:
-        random_state = config.RANDOM_SEED
+def svm_classify(X, y_labels, n_splits=5, random_state=42):
     y = _encode(y_labels)
-    est = SVC(kernel='linear', random_state=random_state)
-    return _dispatch(est,
-                     lambda: SVC(kernel='linear', random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+    return _run_cv(
+        lambda: SVC(kernel='linear', random_state=random_state),
+        X, y, n_splits, random_state
+    )
 
 
-def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                      random_state=None):
-    if random_state is None:
-        random_state = config.RANDOM_SEED
+def gradient_boosting(X, y_labels, n_splits=5, random_state=42):
     y = _encode(y_labels)
-    est = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                     max_depth=3, random_state=random_state)
-    return _dispatch(est,
-                     lambda: GradientBoostingClassifier(n_estimators=100,
-                                learning_rate=0.1, max_depth=3,
-                                random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+    return _run_cv(
+        lambda: GradientBoostingClassifier(
+            n_estimators=100, learning_rate=0.1, max_depth=3, random_state=random_state
+        ),
+        X, y, n_splits, random_state
+    )
 
 
-def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                        random_state=None):
-    if random_state is None:
-        random_state = config.RANDOM_SEED
+def logistic_regression(X, y_labels, n_splits=5, random_state=42):
     y = _encode(y_labels)
-    est = LogisticRegression(max_iter=1000, random_state=random_state)
-    return _dispatch(est,
-                     lambda: LogisticRegression(max_iter=1000,
-                                                random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+    return _run_cv(
+        lambda: LogisticRegression(max_iter=1000, random_state=random_state),
+        X, y, n_splits, random_state
+    )
 
 
-def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                 random_state=None):
+def lda_classify(X, y_labels, n_splits=5, random_state=42):
     y = _encode(y_labels)
-    est = LinearDiscriminantAnalysis()
-    return _dispatch(est, lambda: LinearDiscriminantAnalysis(),
-                     X, y, n_splits, groups, prep_steps)
+    return _run_cv(
+        lambda: LinearDiscriminantAnalysis(),
+        X, y, n_splits, random_state
+    )
 
 
-def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                   random_state=None):
+def ridge_classify(X, y_labels, n_splits=5, random_state=42):
     y = _encode(y_labels)
-    est = RidgeClassifier()
-    return _dispatch(est, lambda: RidgeClassifier(),
-                     X, y, n_splits, groups, prep_steps)
+    return _run_cv(
+        lambda: RidgeClassifier(),
+        X, y, n_splits, random_state
+    )
 
 
-# ── Plotting ───────────────────────────────────────────────────────────────────
+# -- Plotting ------------------------------------------------------------------
 
-def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
+def plot_accuracy_comparison(results, experiment_name, out_path):
     """
-    results : dict {model_name: (test_accs, train_accs)}
-    chance  : float — draws the chance line at 1/n_classes. Pass
-              1/len(classes) from the caller for an accurate baseline.
+    results: dict of {model_name: (test_accs, train_accs)}
+    Produces two panels:
+      - Top: per-fold test accuracy dots + mean bar
+      - Bottom: mean train vs test accuracy to flag overfitting
     """
     names = list(results.keys())
     n = len(names)
@@ -365,33 +135,44 @@ def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
         gridspec_kw={'height_ratios': [2, 1]}
     )
 
+    # -- Top panel: per-fold dots + mean bar -----------------------------------
     for i, (name, (test_accs, train_accs)) in enumerate(results.items()):
         color = palette[i]
+        # Mean bar
         ax_top.bar(i, test_accs.mean(), color=color, alpha=0.5, width=0.6, zorder=1)
-        jitter = np.random.default_rng(config.RANDOM_SEED).uniform(
-            -0.15, 0.15, size=len(test_accs))
-        ax_top.scatter(np.full(len(test_accs), i) + jitter, test_accs,
-                       color=color, edgecolors='black', linewidths=0.5, s=50, zorder=2)
-        ax_top.hlines(test_accs.mean(), i - 0.3, i + 0.3,
-                      colors='black', linewidths=1.5, zorder=3)
+        # Per-fold dots
+        jitter = np.random.default_rng(42).uniform(-0.15, 0.15, size=len(test_accs))
+        ax_top.scatter(
+            np.full(len(test_accs), i) + jitter,
+            test_accs,
+            color=color, edgecolors='black', linewidths=0.5,
+            s=50, zorder=2
+        )
+        # Mean line
+        ax_top.hlines(
+            test_accs.mean(), i - 0.3, i + 0.3,
+            colors='black', linewidths=1.5, zorder=3
+        )
 
     ax_top.set_xticks(range(n))
     ax_top.set_xticklabels(names, rotation=30, ha='right', fontsize=9)
-    ax_top.set_ylabel('Test Accuracy (grouped CV)')
+    ax_top.set_ylabel('Test Accuracy (5-fold CV)')
     ax_top.set_ylim(0, 1.05)
-    ax_top.set_title(f'Classifier Comparison — {experiment_name}')
-    if chance is not None:
-        ax_top.axhline(chance, color='grey', linestyle='--', linewidth=0.8,
-                       alpha=0.6, label=f'Chance ({chance:.3f})')
-        ax_top.legend(fontsize=8)
+    ax_top.set_title(f'Classifier Comparison -- {experiment_name}')
+    ax_top.axhline(0.5, color='grey', linestyle='--', linewidth=0.8, alpha=0.5,
+                   label='Chance (0.5)')
+    ax_top.legend(fontsize=8)
 
+    # -- Bottom panel: train vs test mean (overfitting check) ------------------
     x = np.arange(n)
     width = 0.35
     train_means = [results[name][1].mean() for name in names]
     test_means  = [results[name][0].mean() for name in names]
+
     cb = sns.color_palette('colorblind')
     ax_bot.bar(x - width / 2, train_means, width, label='Train', color=cb[0], alpha=0.7)
     ax_bot.bar(x + width / 2, test_means,  width, label='Test',  color=cb[1], alpha=0.7)
+
     ax_bot.set_xticks(x)
     ax_bot.set_xticklabels(names, rotation=30, ha='right', fontsize=9)
     ax_bot.set_ylabel('Mean Accuracy')
@@ -405,76 +186,102 @@ def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
     print(f"  Saved -> {out_path}")
 
 
-# ── Feature importance overlap (DESCRIPTIVE — full-data fit is correct here) ──
+# -- Feature importance overlap ------------------------------------------------
 
 def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
                                 top_n=50, X_norm=None, log_transform='log10'):
     """
-    Final ensemble feature ranking. Fits RF, SVM, GB, LR, Ridge and PLS-DA VIP
-    on the FULL preprocessed dataset and reports features in the top `top_n`
-    of at least 2 of the 6 methods.
-
-    This is a descriptive model fit on all data by design — it is NOT a
-    generalisation estimate. The CV accuracy figures (above) are the
-    generalisation estimates.
+    Fits RF, SVM, GB, LR, Ridge, and PLS-DA (VIP) on the full dataset and finds
+    m/z features that appear in the top `top_n` of at least 2 of these 6 methods.
 
     Parameters
     ----------
-    X         : fully preprocessed feature matrix (n_samples × n_features)
-    y_labels  : group labels per sample
-    mz        : m/z value for each feature
-    safe_name : filesystem-safe experiment name
-    out_dir   : output directory
-    top_n     : how many top features per method to count
-    X_norm    : same shape as X, but normalised + log-transformed only (no
-                scaling), used for per-group mean intensities. If None, scaled
-                X is used with a warning.
-    log_transform : transformation used to produce X_norm — used to compute
-                mean_margin in linear space.
+    X : ndarray (n_samples, n_features)
+        Fully preprocessed feature matrix (normalised + transformed + scaled).
+        Used by all classifiers and for the Ridge one-vs-rest coefficients.
+    y_labels : ndarray of str
+        Group labels per sample.
+    mz : ndarray
+        m/z value for each feature.
+    safe_name : str
+        Filesystem-safe experiment name (used in output filename).
+    out_dir : str
+        Directory where the feature_overlap CSV is written.
+    top_n : int
+        How many top-ranked features per method to count for the overlap.
+    X_norm : ndarray (n_samples, n_features), optional
+        Same shape as X, but normalised + log-transformed only (no scaling).
+        Used for per-group mean intensities so the values are comparable to
+        the raw spectrum. If None, mean columns are skipped (back-compat).
+    log_transform : str
+        Transformation used to produce X_norm -- one of 'log10', 'log2', 'sqrt',
+        'none'. Used to compute mean_margin in linear space (a ratio) rather
+        than as a quotient on the transformed axis (which would be meaningless).
+
+    Output CSV columns
+    ------------------
+    Identification:
+        mz, n_methods
+    Per-method importances:
+        rf_importance, svm_importance, gb_importance, lr_importance,
+        ridge_importance, vip_score
+    Per-group attribution (NEW):
+        mean_<group>          -- mean log-normalised intensity per group
+        ridge_<group>         -- signed one-vs-rest Ridge coefficient per group
+        top_condition_mean    -- group with the highest mean intensity
+        top_condition_ridge   -- group with the largest positive Ridge coefficient
+        mean_margin           -- top mean / second-highest mean in LINEAR space
+                                (>=1; values close to 1 = ambiguous call)
+        ridge_direction       -- 'elevated' / 'suppressed' / 'mixed'
     """
     le = LabelEncoder()
     y = le.fit_transform(y_labels)
     classes = le.classes_
 
-    rf = RandomForestClassifier(n_estimators=100, random_state=config.RANDOM_SEED)
+    # Fit each model
+    rf = RandomForestClassifier(n_estimators=100, random_state=42)
     rf.fit(X, y)
     rf_imp = rf.feature_importances_
 
-    svm = SVC(kernel='linear', random_state=config.RANDOM_SEED)
+    svm = SVC(kernel='linear', random_state=42)
     svm.fit(X, y)
-    svm_imp = (np.abs(svm.coef_).mean(axis=0) if svm.coef_.ndim > 1
-               else np.abs(svm.coef_).ravel())
+    svm_imp = np.abs(svm.coef_).mean(axis=0) if svm.coef_.ndim > 1 else np.abs(svm.coef_).ravel()
 
     gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                    max_depth=3, random_state=config.RANDOM_SEED)
+                                    max_depth=3, random_state=42)
     gb.fit(X, y)
     gb_imp = gb.feature_importances_
 
-    lr = LogisticRegression(max_iter=1000, random_state=config.RANDOM_SEED)
+    lr = LogisticRegression(max_iter=1000, random_state=42)
     lr.fit(X, y)
-    lr_imp = (np.abs(lr.coef_).mean(axis=0) if lr.coef_.ndim > 1
-              else np.abs(lr.coef_).ravel())
+    lr_imp = np.abs(lr.coef_).mean(axis=0) if lr.coef_.ndim > 1 else np.abs(lr.coef_).ravel()
 
     ridge = RidgeClassifier()
     ridge.fit(X, y)
-    ridge_imp = (np.abs(ridge.coef_).mean(axis=0) if ridge.coef_.ndim > 1
-                 else np.abs(ridge.coef_).ravel())
+    ridge_imp = np.abs(ridge.coef_).mean(axis=0) if ridge.coef_.ndim > 1 else np.abs(ridge.coef_).ravel()
 
     vip_imp = compute_vip_1comp(X, y_labels)
 
-    tops = [set(np.argsort(imp)[::-1][:top_n])
-            for imp in [rf_imp, svm_imp, gb_imp, lr_imp, ridge_imp, vip_imp]]
+    # Find top features per method
+    tops = [
+        set(np.argsort(imp)[::-1][:top_n])
+        for imp in [rf_imp, svm_imp, gb_imp, lr_imp, ridge_imp, vip_imp]
+    ]
     counts = Counter(idx for top in tops for idx in top)
 
     overlap_2plus = {idx for idx, c in counts.items() if c >= 2}
     overlap_3plus = {idx for idx, c in counts.items() if c >= 3}
+
     print(f"  Features in at least 2 of 6 methods: {len(overlap_2plus)}")
     print(f"  Features in at least 3 of 6 methods: {len(overlap_3plus)}")
 
     overlap_list = sorted(overlap_2plus)
+
     method_names = ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']
-    membership = {name: np.array([idx in top for idx in overlap_list], dtype=bool)
-                  for name, top in zip(method_names, tops)}
+    membership = {
+        name: np.array([idx in top for idx in overlap_list], dtype=bool)
+        for name, top in zip(method_names, tops)
+    }
 
     overlap_df = pd.DataFrame({
         'mz':              mz[overlap_list],
@@ -485,12 +292,17 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
         'ridge_importance': ridge_imp[overlap_list],
         'vip_score':       vip_imp[overlap_list],
         'n_methods':       [counts[idx] for idx in overlap_list],
-        'in_rf_top':   membership['rf'],   'in_svm_top':   membership['svm'],
-        'in_gb_top':   membership['gb'],   'in_lr_top':    membership['lr'],
-        'in_ridge_top': membership['ridge'], 'in_vip_top': membership['vip'],
+        'in_rf_top':       membership['rf'],
+        'in_svm_top':      membership['svm'],
+        'in_gb_top':       membership['gb'],
+        'in_lr_top':       membership['lr'],
+        'in_ridge_top':    membership['ridge'],
+        'in_vip_top':      membership['vip'],
     })
 
-    print("  Adding per-group attribution: mean intensity + Ridge one-vs-rest")
+    # -- Per-group attribution columns ----------------------------------------
+    print(f"  Adding per-group attribution: mean intensity + Ridge one-vs-rest")
+
     # Normalise ridge.coef_ to shape (n_classes, n_features) in all cases.
     # Binary sklearn Ridge can return 1D (n_features,) or 2D (1, n_features)
     # depending on sklearn version; multi-class returns (n_classes, n_features).
@@ -519,35 +331,45 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     ridge_cols = [f'ridge_{g}' for g in classes]
 
     mean_arr = overlap_df[mean_cols].values
-    overlap_df['top_condition_mean'] = [classes[i] for i in np.argmax(mean_arr, axis=1)]
+    top_idx_mean = np.argmax(mean_arr, axis=1)
+    overlap_df['top_condition_mean'] = [classes[i] for i in top_idx_mean]
 
+    # Mean margin: ratio of top mean to second-highest mean, in LINEAR space.
     sorted_means = np.sort(mean_arr, axis=1)[:, ::-1]
     top1 = sorted_means[:, 0]
     top2 = sorted_means[:, 1] if sorted_means.shape[1] > 1 else top1
+
     if log_transform == 'log10':
         overlap_df['mean_margin'] = 10.0 ** (top1 - top2)
     elif log_transform == 'log2':
         overlap_df['mean_margin'] = 2.0 ** (top1 - top2)
     elif log_transform == 'sqrt':
-        lin1 = top1 ** 2; lin2 = top2 ** 2
+        lin1 = top1 ** 2
+        lin2 = top2 ** 2
         overlap_df['mean_margin'] = np.where(lin2 > 0, lin1 / lin2, np.nan)
     else:
         overlap_df['mean_margin'] = np.where(top2 > 0, top1 / top2, np.nan)
 
     ridge_arr = overlap_df[ridge_cols].values
-    overlap_df['top_condition_ridge'] = [classes[i] for i in np.argmax(ridge_arr, axis=1)]
+    top_idx_ridge = np.argmax(ridge_arr, axis=1)
+    overlap_df['top_condition_ridge'] = [classes[i] for i in top_idx_ridge]
 
     n_pos = (ridge_arr > 0).sum(axis=1)
     n_neg = (ridge_arr < 0).sum(axis=1)
     direction = []
-    for p, nn in zip(n_pos, n_neg):
-        if p == 1 and nn >= 1:   direction.append('elevated')
-        elif nn == 1 and p >= 1: direction.append('suppressed')
-        else:                    direction.append('mixed')
+    for p, n in zip(n_pos, n_neg):
+        if p == 1 and n >= 1:
+            direction.append('elevated')
+        elif n == 1 and p >= 1:
+            direction.append('suppressed')
+        else:
+            direction.append('mixed')
     overlap_df['ridge_direction'] = direction
 
     overlap_df = overlap_df.sort_values('n_methods', ascending=False)
+
     csv_path = os.path.join(out_dir, f'feature_overlap_{safe_name}.csv')
     overlap_df.to_csv(csv_path, index=False, encoding='utf-8')
     print(f"  Saved -> {csv_path}")
+
     return overlap_df, counts

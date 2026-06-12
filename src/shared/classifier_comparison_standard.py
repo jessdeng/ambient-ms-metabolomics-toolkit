@@ -1,49 +1,39 @@
-"""
-Classifier Comparison for Mass Spectrometry Metabolomics Data (Standard pipeline)
-==================================================================================
-Trains and evaluates 6 supervised classifiers using leave-one-biological-replicate-out
-cross-validation (StratifiedGroupKFold), with all preprocessing fit inside each fold
-to eliminate data leakage.
-
-Methodological design
----------------------
-(1) Pseudoreplication fix.  Technical replicates (T1/T2/T3) of the same colony are
-    NOT independent observations. Cross-validation uses StratifiedGroupKFold with the
-    colony (condition × well) as the grouping unit, so a colony's replicates are always
-    on the same side of every fold boundary. This gives a leave-one-biological-replicate-
-    out estimate of generalisation rather than an inflated within-replicate estimate.
-
-(2) Preprocessing leakage fix.  Variance/abundance filtering, normalisation,
-    log-transformation and scaling are encapsulated in an sklearn Pipeline fitted
-    exclusively on the training fold inside each CV iteration. Test-fold data never
-    influences feature selection or scaling parameters.
-
-Note on feature_importance_analysis(): the ensemble feature ranking is a descriptive
-model fit on all data (the final candidate list), not a generalisation estimate, so
-full-data preprocessing is intentional and correct there.
-
-Classifiers used for accuracy evaluation:
-    Random Forest, SVM (linear), Gradient Boosting, Logistic Regression, LDA, Ridge
-
-Classifiers used for ensemble feature importance (n_methods count):
-    Random Forest, SVM, Gradient Boosting, Logistic Regression, Ridge, PLS-DA VIP
-    (LDA excluded — no comparable feature-level importance measure)
-
-Usage:
-    python -m standard.run_analysis
-"""
-
 import os
-import sys
-import re
+"""
+Classifier Comparison for Mass Spectrometry Metabolomics Data
+=============================================================
+Trains and evaluates six supervised classifiers and reports cross-validated
+train/test accuracy, plus an ensemble feature-importance overlap.
 
+CORRECTED VERSION -- addresses two methodological issues in the original:
+
+  (1) Pseudoreplication. The three technical replicates (T1/T2/T3) of a single
+      colony are NOT independent samples. Cross-validation now uses
+      StratifiedGroupKFold with the colony (condition x well) as the group, so
+      a colony's replicates never straddle the train/test boundary. This is a
+      leave-one-biological-replicate-out estimate of generalisation.
+
+  (2) Preprocessing leakage. Variance/abundance filtering, normalisation,
+      transformation and scaling are now fit on the training fold only and
+      applied to the held-out fold, via an sklearn Pipeline. Previously these
+      were fit on the full matrix before splitting, leaking test-fold
+      information into feature selection and scaling.
+
+Note on feature_importance_analysis(): the ensemble feature ranking is a
+DESCRIPTIVE model fit on all data and reported as the final candidate list. It
+is not a generalisation estimate, so full-data preprocessing there is correct
+and is intentionally left unchanged.
+
+Classifiers: Random Forest, SVM (linear), Gradient Boosting,
+             Logistic Regression, LDA, Ridge.
+"""
+
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
+import re
 
 from collections import Counter
 
@@ -60,7 +50,7 @@ from sklearn.metrics import accuracy_score
 from standard.pipeline import compute_vip_1comp
 
 
-# ── Preprocessing transformers (train-fit; mirror preprocessing.preprocess) ────
+# -- Preprocessing transformers (train-fit; mirror preprocessing.preprocess) -----
 # Each transformer learns its parameters on .fit() (training fold only) and
 # applies them on .transform(). Fitting any of these on the full dataset
 # reproduces standard/preprocessing.py exactly (verified: max abs diff 0.0).
@@ -187,16 +177,16 @@ class Scaler(BaseEstimator, TransformerMixin):
         raise ValueError(f"Unknown scaling: '{self.method}'")
 
 
-# ── Grouping + preprocessor helpers ────────────────────────────────────────────
+# -- Grouping + preprocessor helpers ---------------------------------------------
 
 def make_groups(y_labels, names):
     """
     Build a cross-validation group label per sample so that technical
     replicates of one colony share a group and never split across folds.
 
-    group = '<condition>::<well>'  e.g. 'ConditionA::W1'
+    group = '<condition>::<well>'  e.g. 'Amber::A6'
 
-    Parsed from the filename token immediately before T<n> (e.g. W1T2 -> W1).
+    Parsed from the filename token immediately before T<n> (e.g. A6T1 -> A6).
     Falls back to the filename if the pattern is absent (then each file is its
     own group, which simply disables grouping for that sample).
     """
@@ -235,7 +225,7 @@ def auto_n_splits(y_labels, groups, desired=5):
     return int(max(2, min(desired, min(per_class))))
 
 
-# ── Cross-validation runners ───────────────────────────────────────────────────
+# -- Cross-validation runners ----------------------------------------------------
 
 def _encode(y_labels):
     return LabelEncoder().fit_transform(y_labels)
@@ -249,14 +239,14 @@ def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits):
     """
     steps = [(name, clone(t)) for name, t in prep_steps] + [('clf', clone(estimator))]
     pipe = Pipeline(steps)
-    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=config.RANDOM_SEED)
+    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
     res = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
                          scoring='accuracy', return_train_score=True)
     return res['test_score'], res['train_score']
 
 
-def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=config.RANDOM_SEED):
-    """Original ungrouped CV on an already-preprocessed X. Leaky — kept only
+def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=42):
+    """Original ungrouped CV on an already-preprocessed X. Leaky -- kept only
     for backward compatibility with callers that have not been updated."""
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     test_accs, train_accs = [], []
@@ -281,24 +271,24 @@ def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps):
     return _run_cv_legacy(legacy_fn, X, y, n_splits)
 
 
-# ── Individual classifiers ──────────────────────────────────────────────────────
+# -- Individual classifiers ------------------------------------------------------
 # New signature: pass the BINNED matrix as X, plus groups= and prep_steps=.
 
-def random_forest(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=config.RANDOM_SEED):
+def RandomForest(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
     y = _encode(y_labels)
     est = RandomForestClassifier(n_estimators=100, random_state=random_state)
     return _dispatch(est, lambda: RandomForestClassifier(n_estimators=100, random_state=random_state),
                      X, y, n_splits, groups, prep_steps)
 
 
-def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=config.RANDOM_SEED):
+def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
     y = _encode(y_labels)
     est = SVC(kernel='linear', random_state=random_state)
     return _dispatch(est, lambda: SVC(kernel='linear', random_state=random_state),
                      X, y, n_splits, groups, prep_steps)
 
 
-def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=config.RANDOM_SEED):
+def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
     y = _encode(y_labels)
     est = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
                                      max_depth=3, random_state=random_state)
@@ -307,28 +297,28 @@ def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None, ran
                      X, y, n_splits, groups, prep_steps)
 
 
-def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=config.RANDOM_SEED):
+def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
     y = _encode(y_labels)
     est = LogisticRegression(max_iter=1000, random_state=random_state)
     return _dispatch(est, lambda: LogisticRegression(max_iter=1000, random_state=random_state),
                      X, y, n_splits, groups, prep_steps)
 
 
-def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=config.RANDOM_SEED):
+def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
     y = _encode(y_labels)
     est = LinearDiscriminantAnalysis()
     return _dispatch(est, lambda: LinearDiscriminantAnalysis(),
                      X, y, n_splits, groups, prep_steps)
 
 
-def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=config.RANDOM_SEED):
+def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
     y = _encode(y_labels)
     est = RidgeClassifier()
     return _dispatch(est, lambda: RidgeClassifier(),
                      X, y, n_splits, groups, prep_steps)
 
 
-# ── Plotting ────────────────────────────────────────────────────────────────────
+# -- Plotting --------------------------------------------------------------------
 
 def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
     """
@@ -358,7 +348,7 @@ def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
     ax_top.set_xticklabels(names, rotation=30, ha='right', fontsize=9)
     ax_top.set_ylabel('Test Accuracy (grouped CV)')
     ax_top.set_ylim(0, 1.05)
-    ax_top.set_title(f'Classifier Comparison — {experiment_name}')
+    ax_top.set_title(f'Classifier Comparison -- {experiment_name}')
     if chance is not None:
         ax_top.axhline(chance, color='grey', linestyle='--', linewidth=0.8, alpha=0.6,
                        label=f'Chance ({chance:.3f})')
@@ -384,7 +374,7 @@ def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
     print(f"  Saved -> {out_path}")
 
 
-# ── Feature importance overlap (DESCRIPTIVE — full-data fit is correct here) ─────
+# -- Feature importance overlap (DESCRIPTIVE -- full-data fit is correct here) ---
 
 def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
                                 top_n=50, X_norm=None, log_transform='log10'):
@@ -401,17 +391,17 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     y = le.fit_transform(y_labels)
     classes = le.classes_
 
-    rf = RandomForestClassifier(n_estimators=100, random_state=config.RANDOM_SEED); rf.fit(X, y)
+    rf = RandomForestClassifier(n_estimators=100, random_state=42); rf.fit(X, y)
     rf_imp = rf.feature_importances_
 
-    svm = SVC(kernel='linear', random_state=config.RANDOM_SEED); svm.fit(X, y)
+    svm = SVC(kernel='linear', random_state=42); svm.fit(X, y)
     svm_imp = np.abs(svm.coef_).mean(axis=0) if svm.coef_.ndim > 1 else np.abs(svm.coef_).ravel()
 
     gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                    max_depth=3, random_state=config.RANDOM_SEED); gb.fit(X, y)
+                                    max_depth=3, random_state=42); gb.fit(X, y)
     gb_imp = gb.feature_importances_
 
-    lr = LogisticRegression(max_iter=1000, random_state=config.RANDOM_SEED); lr.fit(X, y)
+    lr = LogisticRegression(max_iter=1000, random_state=42); lr.fit(X, y)
     lr_imp = np.abs(lr.coef_).mean(axis=0) if lr.coef_.ndim > 1 else np.abs(lr.coef_).ravel()
 
     ridge = RidgeClassifier(); ridge.fit(X, y)
