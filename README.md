@@ -18,8 +18,9 @@ For detailed notes on parameter choices and output interpretation, see [NOTES.md
 6. [Which Pipeline Should I Use?](#which-pipeline-should-i-use)
 7. [Output Files](#output-files)
 8. [Environment Setup](#environment-setup)
-9. [Reproducibility](#reproducibility)
-10. [Citation](#citation)
+9. [Windows Compatibility](#windows-compatibility)
+10. [Reproducibility](#reproducibility)
+11. [Citation](#citation)
 
 ---
 
@@ -232,16 +233,46 @@ pip install -r requirements.txt
 
 ---
 
-## Reproducibility
+## Windows Compatibility
 
-All stochastic classifiers use `RANDOM_SEED = 42` (set in `config.py`). To verify that results are robust across seeds, change this value (e.g., to `0` or `99`) and re-run — key findings should not change substantially.
+This repository is fully Windows-compatible. All file paths use `os.path.join()` — no hardcoded forward slashes. All dependencies in `environment.yml` are cross-platform.
 
-```python
-# config.py
-RANDOM_SEED = 42   # change to verify robustness
+**Running on Windows (CMD or PowerShell):**
+
+```cmd
+:: Step 1 — Create and activate environment (conda)
+conda env create -f environment.yml
+conda activate ambient-ms
+
+:: Step 2 — Or install with pip
+python setup.py
+
+:: Step 3 — Run from the repository root
+python -m standard.run_analysis
+python -m r_comparable.run_analysis
+python -m standard.extras
 ```
 
-To reproduce results from the paper exactly, keep all `config.py` values at their defaults.
+**Important:** Always run `python -m` commands from the **repository root directory** (the folder containing `config.py`). On Windows this means opening CMD or PowerShell, navigating to the repo folder with `cd`, and then running the commands above.
+
+```cmd
+cd C:\path\to\ambient-ms-metabolomics-toolkit
+python -m standard.run_analysis
+```
+
+**Character encoding:** All terminal output uses ASCII characters and is safe on Windows with the default code page. No `PYTHONIOENCODING` changes are required.
+
+---
+
+## Reproducibility
+
+All stochastic classifiers use `RANDOM_SEED = 42` (set in `config.json` or `config.py`). To verify that results are robust across seeds, change this value and re-run — key findings should not change substantially.
+
+```json
+{ "RANDOM_SEED": 99 }
+```
+
+To reproduce results from the paper exactly, keep all `config.json` values at their defaults.
 
 ---
 

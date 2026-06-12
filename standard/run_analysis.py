@@ -53,7 +53,7 @@ def main():
     # the same feature set.
     X_binned, mz = filter_mass_range(X_binned, mz,
                                      mz_min=config.MZ_MIN, mz_max=config.MZ_MAX)
-    print(f"  After m/z range filter ({config.MZ_MIN}–{config.MZ_MAX} Da): "
+    print(f"  After m/z range filter ({config.MZ_MIN}-{config.MZ_MAX} Da): "
           f"{X_binned.shape[1]} features")
     mz_binned = mz.copy()
 
@@ -134,15 +134,15 @@ def main():
                 groups=groups, prep_steps=prep_steps,
             )
             results[name] = (test_accs, train_accs)
-            print(f"  Test  accuracy: {test_accs.mean():.3f} ± {test_accs.std():.3f}")
-            print(f"  Train accuracy: {train_accs.mean():.3f} ± {train_accs.std():.3f}")
+            print(f"  Test  accuracy: {test_accs.mean():.3f} +/- {test_accs.std():.3f}")
+            print(f"  Train accuracy: {train_accs.mean():.3f} +/- {train_accs.std():.3f}")
             step += 1
 
     results_path = os.path.join(out_dir, f"classifier_results_{safe_name}.npz")
     np.savez(results_path,
              **{f"{name}__test":  test_accs for name, (test_accs, _) in results.items()},
              **{f"{name}__train": train_accs for name, (_, train_accs) in results.items()})
-    print(f"\n  Classifier results saved → {results_path}")
+    print(f"\n  Classifier results saved -> {results_path}")
 
     # ── 11. Plot comparison (chance line at 1/n_classes) ──────────────────────
     print("\n[11/12] Plot Comparison")

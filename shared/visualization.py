@@ -83,4 +83,4 @@ def plot_spectrum_with_features(X_binned, mz_binned, y_labels, overlap_df,
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Saved → {out_path}")
+    print(f"  Saved -> {out_path}")

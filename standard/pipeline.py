@@ -146,7 +146,7 @@ def plot_scores_3d(T, pls, y_labels, classes, experiment_name, out_path):
     )
 
     fig.write_html(out_path)
-    print(f"  Saved → {out_path}")
+    print(f"  Saved -> {out_path}")
 
 
 def plot_vip(vip, mz, X_filt_raw, y_labels, n_top, experiment_name, out_path):
@@ -200,4 +200,4 @@ def plot_vip(vip, mz, X_filt_raw, y_labels, n_top, experiment_name, out_path):
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Saved → {out_path}")
+    print(f"  Saved -> {out_path}")

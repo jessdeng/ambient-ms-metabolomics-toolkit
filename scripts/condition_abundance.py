@@ -143,7 +143,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     plt.savefig(plot_path, dpi=180, bbox_inches='tight', facecolor='white')
     plt.close()
-    print(f"\nSaved plot → {plot_path}")
+    print(f"\nSaved plot -> {plot_path}")
 
 
 if __name__ == '__main__':

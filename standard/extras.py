@@ -101,7 +101,7 @@ def run_summary_report(X, y_labels, mz, safe_name, out_dir,
         "=" * 60,
         f"Samples      : {X.shape[0]}",
         f"Features     : {X.shape[1]}  (after filtering)",
-        f"m/z range    : {mz.min():.1f} – {mz.max():.1f} Da",
+        f"m/z range    : {mz.min():.1f} - {mz.max():.1f} Da",
         f"Groups       : {list(classes)}",
         "",
         "Config",
@@ -118,17 +118,17 @@ def run_summary_report(X, y_labels, mz, safe_name, out_dir,
         lines.append(f"  {g:30s}  n={n}")
 
     if classifier_results:
-        lines += ["", "Classifier Results (mean ± std test accuracy)"]
+        lines += ["", "Classifier Results (mean +/- std test accuracy)"]
         for name, (test_accs, train_accs) in classifier_results.items():
             lines.append(
-                f"  {name:25s}  test={test_accs.mean():.3f}±{test_accs.std():.3f}  "
-                f"train={train_accs.mean():.3f}±{train_accs.std():.3f}"
+                f"  {name:25s}  test={test_accs.mean():.3f}+/-{test_accs.std():.3f}  "
+                f"train={train_accs.mean():.3f}+/-{train_accs.std():.3f}"
             )
 
     txt_path = os.path.join(out_dir, f'summary_{safe_name}.txt')
-    with open(txt_path, 'w') as f:
+    with open(txt_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
-    print(f"  Saved → {txt_path}")
+    print(f"  Saved -> {txt_path}")
 
 
 # ── 2. Within-group variation plot ─────────────────────────────────────────────
@@ -161,7 +161,7 @@ def run_variation_plot(X, y_labels, mz, safe_name, out_dir):
     out_path = os.path.join(out_dir, f'variation_{safe_name}.png')
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Saved → {out_path}")
+    print(f"  Saved -> {out_path}")
 
 
 # ── 3. Feature correlation heatmap ─────────────────────────────────────────────
@@ -190,7 +190,7 @@ def run_correlation_heatmap(X, y_labels, mz, vip_scores, safe_name, out_dir,
     out_path = os.path.join(out_dir, f'correlation_{safe_name}.png')
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Saved → {out_path}")
+    print(f"  Saved -> {out_path}")
 
 
 # ── 4. Permutation test ────────────────────────────────────────────────────────
@@ -230,7 +230,7 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
                                 random_state=random_state)
     obs_acc = obs_test.mean()
     print(f"  Observed accuracy : {obs_acc:.3f}")
-    print(f"  Running {n_permutations} permutations …")
+    print(f"  Running {n_permutations} permutations ...")
 
     rng  = np.random.default_rng(random_state)
     perm_accs = []
@@ -256,10 +256,10 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     valid      = ~np.isnan(perm_accs)
     p_value    = (perm_accs[valid] >= obs_acc).sum() / valid.sum()
 
-    print(f"  Permuted mean acc : {perm_accs[valid].mean():.3f} ± "
+    print(f"  Permuted mean acc : {perm_accs[valid].mean():.3f} +/- "
           f"{perm_accs[valid].std():.3f}")
     print(f"  p-value           : {p_value:.4f}  "
-          f"({'significant' if p_value < 0.05 else 'NOT significant'} at α=0.05)")
+          f"({'significant' if p_value < 0.05 else 'NOT significant'} at a=0.05)")
 
     # Plot
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -276,7 +276,7 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     out_path = os.path.join(out_dir, f'permutation_test_{safe_name}.png')
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Saved → {out_path}")
+    print(f"  Saved -> {out_path}")
 
     # Save null distribution
     np.save(os.path.join(out_dir, f'permutation_null_{safe_name}.npy'), perm_accs)
@@ -293,7 +293,7 @@ def main():
     safe_name       = experiment_name.replace(' ', '_').replace(':', '')
 
     print(f"\nExtras — {experiment_name}")
-    print(f"Output → {OUT_DIR}")
+    print(f"Output -> {OUT_DIR}")
 
     X_binned, X, X_norm, y_labels, sample_names, mz, X_filt_raw = \
         _load_and_preprocess(experiment_name)

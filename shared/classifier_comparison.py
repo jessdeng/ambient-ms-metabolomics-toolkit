@@ -402,7 +402,7 @@ def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Saved → {out_path}")
+    print(f"  Saved -> {out_path}")
 
 
 # ── Feature importance overlap (DESCRIPTIVE — full-data fit is correct here) ──
@@ -541,5 +541,5 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     overlap_df = overlap_df.sort_values('n_methods', ascending=False)
     csv_path = os.path.join(out_dir, f'feature_overlap_{safe_name}.csv')
     overlap_df.to_csv(csv_path, index=False, encoding='utf-8')
-    print(f"  Saved → {csv_path}")
+    print(f"  Saved -> {csv_path}")
     return overlap_df, counts

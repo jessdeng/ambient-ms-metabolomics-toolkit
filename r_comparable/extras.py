@@ -102,7 +102,7 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
                                 random_state=random_state)
     obs_acc = obs_test.mean()
     print(f"  Observed accuracy : {obs_acc:.3f}")
-    print(f"  Running {n_permutations} permutations …")
+    print(f"  Running {n_permutations} permutations ...")
 
     rng = np.random.default_rng(random_state)
     perm_accs = []
@@ -127,10 +127,10 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     valid     = ~np.isnan(perm_accs)
     p_value   = (perm_accs[valid] >= obs_acc).sum() / valid.sum()
 
-    print(f"  Permuted mean acc : {perm_accs[valid].mean():.3f} ± "
+    print(f"  Permuted mean acc : {perm_accs[valid].mean():.3f} +/- "
           f"{perm_accs[valid].std():.3f}")
     print(f"  p-value           : {p_value:.4f}  "
-          f"({'significant' if p_value < 0.05 else 'NOT significant'} at α=0.05)")
+          f"({'significant' if p_value < 0.05 else 'NOT significant'} at a=0.05)")
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.hist(perm_accs[valid], bins=20, color='steelblue', alpha=0.7,
@@ -146,7 +146,7 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     out_path = os.path.join(out_dir, f'permutation_test_{safe_name}.png')
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Saved → {out_path}")
+    print(f"  Saved -> {out_path}")
 
     np.save(os.path.join(out_dir, f'permutation_null_{safe_name}.npy'), perm_accs)
     return obs_acc, perm_accs, p_value
@@ -159,7 +159,7 @@ def main():
     safe_name       = experiment_name.replace(' ', '_').replace(':', '')
 
     print(f"\nExtras (R-comparable) — {experiment_name}")
-    print(f"Output → {OUT_DIR}")
+    print(f"Output -> {OUT_DIR}")
 
     X_binned, X, X_norm, y_labels, sample_names, mz, X_filt_raw = \
         _load_and_preprocess(experiment_name)

@@ -20,7 +20,7 @@ def install():
     print("\n[ok] Setup complete!")
     print("\nNext steps:")
     print("  1. Place your experiment folder inside  data/<EXPERIMENT_NAME>/")
-    print("  2. Set EXPERIMENT in config.py to match that folder name.")
+    print("  2. Set EXPERIMENT in config.json to match that folder name.")
     print("  3. Run the standard pipeline:")
     print("       python -m standard.run_analysis")
     print("     Or the R-comparable pipeline:")

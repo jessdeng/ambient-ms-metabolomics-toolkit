@@ -38,6 +38,8 @@ MIN_N_LABEL = config.HIGH_CONFIDENCE_N_METHODS   # set in config.py
 
 
 def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     # Find all feature overlap CSVs in the output folder
     csv_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, 'feature_overlap_*.csv')))
 

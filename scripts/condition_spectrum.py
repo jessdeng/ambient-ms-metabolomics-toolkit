@@ -85,7 +85,7 @@ def main():
         out_path=out_path,
         min_n_methods=MIN_N_METHODS,
     )
-    print(f"Saved → {out_path}")
+    print(f"Saved -> {out_path}")
 
 
 if __name__ == '__main__':
