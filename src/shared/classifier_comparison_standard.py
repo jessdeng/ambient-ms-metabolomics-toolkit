@@ -49,11 +49,44 @@ from sklearn.metrics import accuracy_score
 
 from standard.pipeline import compute_vip_1comp
 
+# Single source of truth for the seed. Falls back to 42 if config is not on the
+# path (e.g. the module is imported in isolation), preserving prior behaviour.
+try:
+    import config as _config
+    _SEED = _config.RANDOM_SEED
+except Exception:
+    _SEED = 42
+
 
 # -- Preprocessing transformers (train-fit; mirror preprocessing.preprocess) -----
 # Each transformer learns its parameters on .fit() (training fold only) and
 # applies them on .transform(). Fitting any of these on the full dataset
 # reproduces standard/preprocessing.py exactly (verified: max abs diff 0.0).
+
+class PrevalenceFilter(BaseEstimator, TransformerMixin):
+    """Remove features not genuinely detected in >= `threshold` of the samples
+    of at least one class. Label-aware: uses y in .fit() so it must live INSIDE
+    the CV pipeline (fit on the training fold only) to remain leak-free. Mirrors
+    standard.preprocessing.filter_prevalence on raw (pre-normalisation) counts.
+    """
+    def __init__(self, threshold=0.5, min_intensity=0.0):
+        self.threshold = threshold
+        self.min_intensity = min_intensity
+    def fit(self, X, y=None):
+        if self.threshold <= 0 or y is None:
+            self.keep_ = np.ones(X.shape[1], dtype=bool)
+            return self
+        y = np.asarray(y)
+        detected = X > self.min_intensity
+        keep = np.zeros(X.shape[1], dtype=bool)
+        for c in np.unique(y):
+            keep |= detected[y == c].mean(axis=0) >= self.threshold
+        # Guard: never empty the matrix on a degenerate training fold.
+        self.keep_ = keep if keep.any() else np.ones(X.shape[1], dtype=bool)
+        return self
+    def transform(self, X):
+        return X[:, self.keep_]
+
 
 class VarianceFilter(BaseEstimator, TransformerMixin):
     """Remove features with low relative standard deviation (RSD)."""
@@ -199,13 +232,22 @@ def make_groups(y_labels, names):
 
 def make_preprocessor(normalization='tic', log_transform='log10',
                       scaling='autoscale', variance_percentile=25,
-                      abundance_percentile=5):
+                      abundance_percentile=5, prevalence_threshold=0.5,
+                      prevalence_min_intensity=0.0):
     """
     Return the ordered list of (name, transformer) steps that reproduce the
-    original preprocessing chain. Order matches standard/run_analysis.py:
-    variance filter -> abundance filter -> normalise -> transform -> scale.
+    full preprocessing chain. Order matches standard/run_analysis.py:
+    prevalence filter -> variance filter -> abundance filter -> normalise ->
+    transform -> scale.
+
+    The prevalence filter is label-aware and is now part of this pipeline so it
+    is fit on the training fold only (previously it ran once on the full matrix
+    in run_analysis.py, which leaked test-fold labels into feature selection).
+    Pass prevalence_threshold=0 to disable it.
     """
     return [
+        ('prevalence', PrevalenceFilter(prevalence_threshold,
+                                        prevalence_min_intensity)),
         ('variance',  VarianceFilter(variance_percentile)),
         ('abundance', AbundanceFilter(abundance_percentile)),
         ('normalize', Normalizer(normalization)),
@@ -219,10 +261,24 @@ def auto_n_splits(y_labels, groups, desired=5):
     Largest fold count compatible with the grouping. With g biological
     replicates per class, StratifiedGroupKFold needs n_splits <= g; with
     3 replicates this returns 3 (leave-one-replicate-out).
+
+    Guard: every class must contribute >= 2 biological groups. A class with a
+    single group cannot be split across folds, so it would be absent from at
+    least one test fold (a degenerate/empty-class fold). We raise rather than
+    silently produce an unestimable fold.
     """
     y_labels = np.asarray(y_labels)
-    per_class = [len(set(groups[y_labels == c])) for c in np.unique(y_labels)]
-    return int(max(2, min(desired, min(per_class))))
+    groups   = np.asarray(groups)
+    classes  = np.unique(y_labels)
+    per_class = {c: len(set(groups[y_labels == c])) for c in classes}
+    deficient = {c: n for c, n in per_class.items() if n < 2}
+    if deficient:
+        raise ValueError(
+            "Grouped CV requires >= 2 biological groups per class; these "
+            f"classes have fewer: {deficient}. Add replicates or merge/drop "
+            "the class before cross-validation."
+        )
+    return int(max(2, min(desired, min(per_class.values()))))
 
 
 # -- Cross-validation runners ----------------------------------------------------
@@ -239,13 +295,13 @@ def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits):
     """
     steps = [(name, clone(t)) for name, t in prep_steps] + [('clf', clone(estimator))]
     pipe = Pipeline(steps)
-    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=_SEED)
     res = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
                          scoring='accuracy', return_train_score=True)
     return res['test_score'], res['train_score']
 
 
-def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=42):
+def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=_SEED):
     """Original ungrouped CV on an already-preprocessed X. Leaky -- kept only
     for backward compatibility with callers that have not been updated."""
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
@@ -274,21 +330,21 @@ def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps):
 # -- Individual classifiers ------------------------------------------------------
 # New signature: pass the BINNED matrix as X, plus groups= and prep_steps=.
 
-def RandomForest(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
+def RandomForest(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
     y = _encode(y_labels)
     est = RandomForestClassifier(n_estimators=100, random_state=random_state)
     return _dispatch(est, lambda: RandomForestClassifier(n_estimators=100, random_state=random_state),
                      X, y, n_splits, groups, prep_steps)
 
 
-def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
+def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
     y = _encode(y_labels)
     est = SVC(kernel='linear', random_state=random_state)
     return _dispatch(est, lambda: SVC(kernel='linear', random_state=random_state),
                      X, y, n_splits, groups, prep_steps)
 
 
-def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
+def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
     y = _encode(y_labels)
     est = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
                                      max_depth=3, random_state=random_state)
@@ -297,21 +353,21 @@ def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None, ran
                      X, y, n_splits, groups, prep_steps)
 
 
-def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
+def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
     y = _encode(y_labels)
     est = LogisticRegression(max_iter=1000, random_state=random_state)
     return _dispatch(est, lambda: LogisticRegression(max_iter=1000, random_state=random_state),
                      X, y, n_splits, groups, prep_steps)
 
 
-def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
+def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
     y = _encode(y_labels)
     est = LinearDiscriminantAnalysis()
     return _dispatch(est, lambda: LinearDiscriminantAnalysis(),
                      X, y, n_splits, groups, prep_steps)
 
 
-def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=42):
+def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
     y = _encode(y_labels)
     est = RidgeClassifier()
     return _dispatch(est, lambda: RidgeClassifier(),
@@ -391,17 +447,17 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     y = le.fit_transform(y_labels)
     classes = le.classes_
 
-    rf = RandomForestClassifier(n_estimators=100, random_state=42); rf.fit(X, y)
+    rf = RandomForestClassifier(n_estimators=100, random_state=_SEED); rf.fit(X, y)
     rf_imp = rf.feature_importances_
 
-    svm = SVC(kernel='linear', random_state=42); svm.fit(X, y)
+    svm = SVC(kernel='linear', random_state=_SEED); svm.fit(X, y)
     svm_imp = np.abs(svm.coef_).mean(axis=0) if svm.coef_.ndim > 1 else np.abs(svm.coef_).ravel()
 
     gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                    max_depth=3, random_state=42); gb.fit(X, y)
+                                    max_depth=3, random_state=_SEED); gb.fit(X, y)
     gb_imp = gb.feature_importances_
 
-    lr = LogisticRegression(max_iter=1000, random_state=42); lr.fit(X, y)
+    lr = LogisticRegression(max_iter=1000, random_state=_SEED); lr.fit(X, y)
     lr_imp = np.abs(lr.coef_).mean(axis=0) if lr.coef_.ndim > 1 else np.abs(lr.coef_).ravel()
 
     ridge = RidgeClassifier(); ridge.fit(X, y)

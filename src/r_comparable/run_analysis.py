@@ -118,6 +118,7 @@ def main():
         normalization=config.NORMALIZATION, log_transform=config.LOG_TRANSFORM,
         scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
         abundance_percentile=config.ABUNDANCE_PERCENTILE,
+        prevalence_threshold=0.0,   # R-comparable path never applied prevalence
     )
     n_splits = auto_n_splits(y_labels, groups, desired=config.CV_FOLDS)
     print(f"\n  CV scheme: leave-one-biological-replicate-out "

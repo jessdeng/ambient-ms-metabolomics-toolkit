@@ -62,25 +62,33 @@ def main():
     print(f"  After m/z range filter ({config.MZ_MIN}--{config.MZ_MAX} Da): "
           f"{X_binned.shape[1]} features")
 
-    # -- 2c. Prevalence filter (applied to raw binned matrix) ---------------------
-    # Drops features that only survive due to half-min imputation.
-    # Must run on the raw counts BEFORE any log-transform so that zeros are
-    # still zeros and the 'detected vs imputed' distinction is preserved.
+    # -- 2c. Prevalence filter -- DESCRIPTIVE PATH ONLY ---------------------------
+    # Drops features that only survive due to half-min imputation. The prevalence
+    # filter is label-aware (supervised), so it must NOT be applied to the matrix
+    # that feeds cross-validation: doing so once on the full data leaks test-fold
+    # labels into feature selection. The CV path therefore keeps the RAW binned
+    # matrix (X_binned) and applies prevalence INSIDE the pipeline, fit per-fold
+    # (see make_preprocessor(prevalence_threshold=...)). Here we build a separate
+    # full-data copy (X_desc) used only by the descriptive PLS-DA/VIP/ensemble,
+    # where full-data fitting is acknowledged and acceptable.
+    # Must run on raw counts BEFORE any log-transform so zeros stay zeros.
     if config.PREVALENCE_THRESHOLD > 0.0:
-        X_binned, mz_binned = filter_prevalence(
+        X_desc, mz_desc = filter_prevalence(
             X_binned, mz_binned, y_labels,
             threshold=config.PREVALENCE_THRESHOLD,
         )
+    else:
+        X_desc, mz_desc = X_binned.copy(), mz_binned.copy()
 
     # -- 3. Filter (FULL-DATA copy -- for the descriptive PLS-DA/VIP/ensemble) --
     # These outputs are reported models fit on all data, so full-data
     # preprocessing is correct for them (it is NOT used for the CV accuracies).
     print(f"\n[3/12] Filtering (descriptive, full-data)")
     if config.VARIANCE_PERCENTILE > 0:
-        X_filt, mz = filter_low_variance(X_binned, mz_binned, percentile=config.VARIANCE_PERCENTILE)
+        X_filt, mz = filter_low_variance(X_desc, mz_desc, percentile=config.VARIANCE_PERCENTILE)
         print(f"  After variance filter ({config.VARIANCE_PERCENTILE}%): {X_filt.shape[1]} features")
     else:
-        X_filt, mz = X_binned.copy(), mz_binned.copy()
+        X_filt, mz = X_desc.copy(), mz_desc.copy()
         print(f"  Variance filter disabled")
     if config.ABUNDANCE_PERCENTILE > 0:
         X_filt, mz = filter_low_abundance(X_filt, mz, percentile=config.ABUNDANCE_PERCENTILE)
@@ -111,6 +119,7 @@ def main():
         normalization=config.NORMALIZATION, log_transform=config.LOG_TRANSFORM,
         scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
         abundance_percentile=config.ABUNDANCE_PERCENTILE,
+        prevalence_threshold=config.PREVALENCE_THRESHOLD,
     )
     n_splits = auto_n_splits(y_labels, groups, desired=config.CV_FOLDS)
     print(f"\n  CV scheme: leave-one-biological-replicate-out "
