@@ -14,7 +14,7 @@ import numpy as np
 
 import config
 from standard.preprocessing import (load_experiment, bin_features,
-    filter_mass_range, filter_prevalence,
+    filter_mass_range, filter_snr_floor, filter_prevalence,
     filter_low_variance, filter_low_abundance, preprocess)
 from standard.pipeline import compute_vip_1comp, fit_plsda, plot_scores_3d, plot_vip
 from shared.classifier_comparison_standard import (
@@ -62,7 +62,23 @@ def main():
     print(f"  After m/z range filter ({config.MZ_MIN}--{config.MZ_MAX} Da): "
           f"{X_binned.shape[1]} features")
 
-    # -- 2c. Prevalence filter -- DESCRIPTIVE PATH ONLY ---------------------------
+    # -- 2c. SNR floor (optional) -------------------------------------------------
+    # Applied on raw binned intensities — strips flat baseline bins that never
+    # rise above the per-sample noise floor in any condition group.  Does NOT
+    # remove genuine low-abundance or single-condition features.
+    # Uses y_labels before the split (same justification as filter_prevalence).
+    if config.SNR_FLOOR_ENABLED:
+        print(f"\n  SNR floor filter (threshold={config.SNR_THRESHOLD}, "
+              f"noise_q={config.NOISE_QUANTILE}, "
+              f"min_frac={config.MIN_FRACTION_IN_GROUP})")
+        X_binned, mz_binned = filter_snr_floor(
+            X_binned, mz_binned, y_labels,
+            snr_threshold=config.SNR_THRESHOLD,
+            noise_quantile=config.NOISE_QUANTILE,
+            min_fraction=config.MIN_FRACTION_IN_GROUP,
+        )
+
+    # -- 2d. Prevalence filter -- DESCRIPTIVE PATH ONLY ---------------------------
     # Drops features that only survive due to half-min imputation. The prevalence
     # filter is label-aware (supervised), so it must NOT be applied to the matrix
     # that feeds cross-validation: doing so once on the full data leaks test-fold
@@ -120,6 +136,10 @@ def main():
         scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
         abundance_percentile=config.ABUNDANCE_PERCENTILE,
         prevalence_threshold=config.PREVALENCE_THRESHOLD,
+        snr_floor_enabled=config.SNR_FLOOR_ENABLED,
+        snr_threshold=config.SNR_THRESHOLD,
+        noise_quantile=config.NOISE_QUANTILE,
+        min_fraction_in_group=config.MIN_FRACTION_IN_GROUP,
     )
     n_splits = auto_n_splits(y_labels, groups, desired=config.CV_FOLDS)
     print(f"\n  CV scheme: leave-one-biological-replicate-out "

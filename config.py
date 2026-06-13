@@ -56,6 +56,28 @@ ABUNDANCE_PERCENTILE = 5  # remove bottom X% of features by abundance (0 = off)
 # 0.5 = 50 % (lenient); 0.8 = 80 % (strict). Set to 0.0 to disable.
 PREVALENCE_THRESHOLD = 0.5
 
+# SNR floor — removes bins whose signal never rises above the per-sample
+# baseline noise in any condition group.  Applied on raw binned intensities
+# BEFORE normalization.  Does NOT cut by m/z — genuinely low-abundance or
+# single-condition features are retained as long as they exceed the noise
+# floor in at least min_fraction of samples within at least one group.
+#
+# Per-sample robust noise estimate: sigma_i = 1.4826 * MAD of all bins in
+# sample i that fall below its noise_quantile-th percentile.  This uses only
+# within-sample values — no cross-sample or cross-group information.
+#
+# A feature is kept if SNR >= snr_threshold in >= min_fraction of samples
+# within AT LEAST ONE group (same group-aware, discovery-preserving logic as
+# the prevalence filter).
+#
+# Standard pipeline default: ENABLED (recommended for ambient MS baseline
+# suppression without sacrificing genuine low-abundance features).
+# R-comparable pipeline default: DISABLED (preserves MetaboAnalyst parity).
+SNR_FLOOR_ENABLED      = True   # standard default; r_comparable defaults False
+SNR_THRESHOLD          = 3      # minimum SNR to count a sample as detected
+NOISE_QUANTILE         = 60     # percentile used to identify the noise region
+MIN_FRACTION_IN_GROUP  = 0.5    # min fraction of group samples that must pass
+
 
 # ── Normalization ──────────────────────────────────────────────────────────────
 # Corrects for differences in sample amount, injection volume, or instrument
@@ -88,14 +110,23 @@ NORMALIZATION = 'tic'
 
 
 # ── Transformation ─────────────────────────────────────────────────────────────
-# Log10 transformation compresses the wide dynamic range of MS data so that
+# Transformation compresses the wide dynamic range of MS data so that
 # high-intensity features do not dominate the analysis.
 # Options:
-#   'log10'  — recommended for most MS metabolomics data (default)
+#   'glog'   — generalized-log / arcsinh transform: asinh(x / lambda_).
+#              Linear near zero (does not amplify additive baseline noise),
+#              log-like at high intensity (stabilises log-normal regime).
+#              Tolerates exact zeros without the half-min offset hack.
+#              lambda_ is the 5th percentile of positive values — a robust
+#              noise-floor estimate fitted from training data in CV.
+#              Recommended for ambient MS with a significant baseline; this
+#              is the new standard-pipeline default.
+#   'log10'  — log base-10 with half-minimum offset; MetaboAnalyst default.
+#              R-comparable pipeline default for MetaboAnalyst parity.
 #   'log2'   — similar to log10 but with base 2; common in transcriptomics
 #   'sqrt'   — square root transform; gentler compression than log
 #   'none'   — no transformation applied
-LOG_TRANSFORM = 'log10'
+LOG_TRANSFORM = 'glog'   # standard default; r_comparable defaults 'log10'
 
 
 # ── Scaling ────────────────────────────────────────────────────────────────────
@@ -216,6 +247,12 @@ HIGH_CONFIDENCE_N_METHODS = 4
 # ── Load overrides from config.json (if present) ─────────────────────────────
 # Any key in config.json that matches a variable name above will override it.
 # Keys starting with '_' (like "_comment") are ignored.
+#
+# _json_keys: set of keys explicitly provided in config.json.  The r_comparable
+# pipeline reads this to distinguish "user set this" from "config.py default",
+# so it can apply its own MetaboAnalyst-matching defaults when the user has not
+# explicitly overridden LOG_TRANSFORM, SCALING, or SNR_FLOOR_ENABLED.
+_json_keys: set = set()
 _config_json_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'config.json')
 if _os.path.exists(_config_json_path):
     with open(_config_json_path) as _f:
@@ -224,5 +261,6 @@ if _os.path.exists(_config_json_path):
     for _k, _v in _overrides.items():
         if not _k.startswith('_') and _k in _g:
             _g[_k] = _v
+            _json_keys.add(_k)
     del _g, _k, _v, _f, _overrides
 del _config_json_path, _os, _json

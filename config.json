@@ -1,22 +1,28 @@
 {
   "_comment": "Edit this file to configure your experiment. Values here override config.py defaults. Only the fields you change need to be present.",
 
-  "EXPERIMENT": "your_experiment_folder",
+  "EXPERIMENT": "experiment_a",
 
   "MZ_MIN": 100,
-  "MZ_MAX": 1000,
-  "BIN_WIDTH": 0.5,
+  "MZ_MAX": 1200,
+  "BIN_WIDTH": 1.0,
 
-  "NORMALIZATION": "tic",
+  "NORMALIZATION": "pqn",
   "LOG_TRANSFORM": "log10",
-  "SCALING": "autoscale",
+  "SCALING": "pareto",
 
-  "VARIANCE_PERCENTILE": 25,
+  "VARIANCE_PERCENTILE": 10,
   "ABUNDANCE_PERCENTILE": 5,
+
+  "_snr_comment": "SNR floor: set SNR_FLOOR_ENABLED=true to strip flat baseline bins (recommended for standard pipeline). Default false keeps existing analysis unchanged.",
+  "SNR_FLOOR_ENABLED": false,
+  "SNR_THRESHOLD": 3,
+  "NOISE_QUANTILE": 60,
+  "MIN_FRACTION_IN_GROUP": 0.5,
 
   "RANDOM_SEED": 42,
   "CV_FOLDS": 5,
 
   "RUN_PERMUTATION_TEST": true,
-  "N_PERMUTATIONS": 100
+  "N_PERMUTATIONS": 1000
 }

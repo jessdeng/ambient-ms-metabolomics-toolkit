@@ -31,7 +31,7 @@ from sklearn.preprocessing import LabelEncoder
 
 import config
 from r_comparable.preprocessing import (
-    load_experiment, bin_features, filter_mass_range,
+    load_experiment, bin_features, filter_mass_range, filter_snr_floor,
     filter_low_variance, filter_low_abundance, preprocess,
 )
 from r_comparable.pipeline import compute_vip_1comp, fit_plsda
@@ -40,6 +40,12 @@ from shared.classifier_comparison import (
     feature_importance_analysis,
     make_groups, make_preprocessor, auto_n_splits,
 )
+
+# ── Per-pipeline default resolution ──────────────────────────────────────────
+_json_keys     = getattr(config, '_json_keys', set())
+_LOG_TRANSFORM = config.LOG_TRANSFORM  if 'LOG_TRANSFORM'       in _json_keys else 'log10'
+_SCALING       = config.SCALING        if 'SCALING'             in _json_keys else 'autoscale'
+_SNR_ENABLED   = config.SNR_FLOOR_ENABLED if 'SNR_FLOOR_ENABLED' in _json_keys else False
 
 # Re-use the helper functions from standard.extras (they are pipeline-agnostic)
 from standard.extras import (
@@ -65,6 +71,15 @@ def _load_and_preprocess(experiment_name):
     X_binned, mz = filter_mass_range(X_binned, mz,
                                      mz_min=config.MZ_MIN, mz_max=config.MZ_MAX)
 
+    # SNR floor (optional; OFF by default for r_comparable)
+    if _SNR_ENABLED:
+        X_binned, mz = filter_snr_floor(
+            X_binned, mz, y_labels,
+            snr_threshold=config.SNR_THRESHOLD,
+            noise_quantile=config.NOISE_QUANTILE,
+            min_fraction=config.MIN_FRACTION_IN_GROUP,
+        )
+
     if config.VARIANCE_PERCENTILE > 0:
         X_filt, mz = filter_low_variance(X_binned, mz.copy(),
                                          percentile=config.VARIANCE_PERCENTILE)
@@ -77,9 +92,9 @@ def _load_and_preprocess(experiment_name):
 
     X_filt_raw = X_filt.copy()
     X_norm = preprocess(X_filt.copy(), normalization=config.NORMALIZATION,
-                        log_transform=config.LOG_TRANSFORM, scaling='none')
+                        log_transform=_LOG_TRANSFORM, scaling='none')
     X = preprocess(X_filt, normalization=config.NORMALIZATION,
-                   log_transform=config.LOG_TRANSFORM, scaling=config.SCALING)
+                   log_transform=_LOG_TRANSFORM, scaling=_SCALING)
 
     return X_binned, X, X_norm, y_labels, sample_names, mz, X_filt_raw
 
@@ -95,9 +110,13 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
 
     groups     = make_groups(y_labels, sample_names)
     prep_steps = make_preprocessor(
-        normalization=config.NORMALIZATION, log_transform=config.LOG_TRANSFORM,
-        scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
+        normalization=config.NORMALIZATION, log_transform=_LOG_TRANSFORM,
+        scaling=_SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
         abundance_percentile=config.ABUNDANCE_PERCENTILE,
+        snr_floor_enabled=_SNR_ENABLED,
+        snr_threshold=config.SNR_THRESHOLD,
+        noise_quantile=config.NOISE_QUANTILE,
+        min_fraction_in_group=config.MIN_FRACTION_IN_GROUP,
     )
     n_splits = auto_n_splits(y_labels, groups, desired=config.CV_FOLDS)
 

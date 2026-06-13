@@ -110,8 +110,12 @@ Edit `config.json` in the repository root — no Python editing required:
   "MZ_MAX": 1000,
   "BIN_WIDTH": 0.5,
   "NORMALIZATION": "tic",
-  "LOG_TRANSFORM": "log10",
+  "LOG_TRANSFORM": "glog",
   "SCALING": "autoscale",
+  "SNR_FLOOR_ENABLED": true,
+  "SNR_THRESHOLD": 3,
+  "NOISE_QUANTILE": 60,
+  "MIN_FRACTION_IN_GROUP": 0.5,
   "RANDOM_SEED": 42,
   "RUN_PERMUTATION_TEST": true
 }
@@ -120,6 +124,28 @@ Edit `config.json` in the repository root — no Python editing required:
 Only include the keys you want to change — missing keys fall back to defaults in `config.py`. See `config.py` for the full parameter list and documentation.
 
 **The only required key is `EXPERIMENT`**, which must match the name of your experiment folder inside `data/`.
+
+### Per-pipeline defaults
+
+The two pipelines have different out-of-box defaults for `LOG_TRANSFORM`, `SCALING`, and `SNR_FLOOR_ENABLED`. If you do **not** set these in `config.json`, each pipeline uses its own defaults:
+
+| Key | Standard default | R-comparable default | Reason |
+|-----|-----------------|---------------------|--------|
+| `LOG_TRANSFORM` | `"glog"` | `"log10"` | Standard: arcsinh is linear near zero (suppresses baseline amplification). R-comparable: log10 matches MetaboAnalyst. |
+| `SCALING` | `"autoscale"` | `"autoscale"` | Same for both. |
+| `SNR_FLOOR_ENABLED` | `true` | `false` | Standard: floor on for ambient MS baseline suppression. R-comparable: off to preserve MetaboAnalyst parity. |
+
+If you **do** set any of these in `config.json`, your choice applies to both pipelines.
+
+### New configuration keys
+
+| Key | Default (standard) | Description |
+|-----|--------------------|-------------|
+| `LOG_TRANSFORM` | `"glog"` | Added `"glog"` option: `arcsinh(x / lambda_)` transform. Linear near zero, log-like at high intensity, tolerates exact zeros. `lambda_` is the 5th percentile of positive values, fitted per fold in CV. Existing options `"log10"`, `"log2"`, `"sqrt"`, `"none"` unchanged. |
+| `SNR_FLOOR_ENABLED` | `true` | Enable/disable the SNR intensity floor filter. When `true`, strips bins that never exceed the per-sample noise floor in any condition group. Does **not** remove genuine low-abundance or single-condition features. |
+| `SNR_THRESHOLD` | `3` | Minimum signal-to-noise ratio for a sample to count as a detection within the SNR floor filter. |
+| `NOISE_QUANTILE` | `60` | Percentile of each sample's intensity distribution used to identify the noise region for the MAD noise estimate. |
+| `MIN_FRACTION_IN_GROUP` | `0.5` | Minimum fraction of samples in a group that must meet `SNR_THRESHOLD` for the feature to be retained. Mirrors `PREVALENCE_THRESHOLD` logic. |
 
 ---
 
@@ -184,9 +210,11 @@ Custom transformers (`VarianceFilter`, `AbundanceFilter`, `Normalizer`, `LogTran
 | **Extras** | `python -m src.standard.extras` | `python -m src.r_comparable.extras` |
 | **Output** | `results/standard/` | `results/r_comparable/` |
 | **Bin labels** | Mean of actual m/z values in bin | Lower bin edge (MetaboAnalyst convention) |
+| **Default transform** | `glog` (arcsinh) | `log10` (MetaboAnalyst default) |
+| **Default SNR floor** | On (`SNR_FLOOR_ENABLED=true`) | Off (`SNR_FLOOR_ENABLED=false`) |
 | **Use when** | General use, database lookup | Matching R/MetaboAnalyst PLS-DA results |
 
-Classifier accuracies and VIP scores are numerically identical between both versions; only the reported m/z per feature differs.
+Classifier accuracies and VIP scores are numerically comparable between both versions (bin labels and transforms differ but the pipeline logic is identical). Setting `LOG_TRANSFORM` and `SNR_FLOOR_ENABLED` explicitly in `config.json` applies those values to both pipelines.
 
 ---
 

@@ -177,6 +177,92 @@ def filter_prevalence(X, mz, y_labels, threshold=0.5, min_intensity=0.0):
     return X[:, keep], mz[keep]
 
 
+def filter_snr_floor(X, mz, y_labels, snr_threshold=3, noise_quantile=60, min_fraction=0.5):
+    """
+    Remove bins whose signal never exceeds the per-sample baseline noise in any
+    condition group.  Applied on RAW binned intensities, BEFORE normalization.
+
+    Per-sample robust noise
+    -----------------------
+    For each sample i, noise is estimated from its own spectrum only (no
+    cross-sample information):
+
+        low_bins_i  = X[i, mz_bins] where X[i, b] <= percentile(X[i,:], noise_quantile)
+        sigma_i     = 1.4826 * MAD(low_bins_i)
+
+    where 1.4826 scales MAD to be consistent with the Gaussian std-dev.
+    If all bins have the same value (degenerate) sigma_i is set to a small
+    guard value so SNR still becomes finite.
+
+    Group-aware, discovery-preserving
+    ----------------------------------
+    Feature j is KEPT if, within at LEAST ONE condition group, the fraction of
+    samples where SNR[i,j] = X[i,j]/sigma_i >= snr_threshold is >= min_fraction.
+    This mirrors filter_prevalence: a feature present in only one group is
+    retained; requiring it to pass in EVERY group would discard condition-
+    specific metabolites.
+
+    Parameters
+    ----------
+    X              : ndarray (n_samples, n_features) — raw binned intensities
+    mz             : ndarray (n_features,) — m/z per bin
+    y_labels       : array-like (n_samples,) — condition label per sample
+    snr_threshold  : float — minimum SNR to count a sample as detected (default 3)
+    noise_quantile : float — percentile of each sample's intensities used to
+                     identify the noise region (default 60)
+    min_fraction   : float — minimum fraction of group samples that must meet
+                     snr_threshold for the feature to be kept (default 0.5)
+
+    Returns
+    -------
+    X_filt  : ndarray (n_samples, n_kept)
+    mz_filt : ndarray (n_kept,)
+    """
+    y_labels   = np.asarray(y_labels)
+    groups     = np.unique(y_labels)
+    n_samples, n_features = X.shape
+
+    # Per-sample robust noise: sigma_i = 1.4826 * MAD of the low-intensity bins
+    sigma = np.empty(n_samples)
+    for i in range(n_samples):
+        row       = X[i]
+        threshold = np.percentile(row, noise_quantile)
+        low_vals  = row[row <= threshold]
+        if len(low_vals) >= 2:
+            med  = np.median(low_vals)
+            mad  = np.median(np.abs(low_vals - med))
+            if mad > 0:
+                sigma[i] = 1.4826 * mad
+            else:
+                # MAD = 0 means all noise-region values are identical — the noise
+                # floor IS that constant level.  Use the median as sigma so that
+                # a feature at exactly that level gets SNR = 1.0 (below threshold).
+                sigma[i] = max(abs(med), 1e-10)
+        else:
+            sigma[i] = max(float(row.min()), 1e-10)
+
+    # SNR matrix: shape (n_samples, n_features)
+    SNR = X / sigma[:, np.newaxis]
+
+    # Group-aware keep: retain feature j if it passes in >= 1 group
+    keep = np.zeros(n_features, dtype=bool)
+    group_info = []
+    for group in groups:
+        g_mask     = (y_labels == group)
+        passes     = (SNR[g_mask] >= snr_threshold).mean(axis=0) >= min_fraction
+        keep      |= passes
+        group_info.append((group, int(passes.sum())))
+
+    n_removed = n_features - keep.sum()
+    print(f"  SNR floor (SNR>={snr_threshold}, noise_q={noise_quantile}, "
+          f"min_frac={min_fraction}): removed {n_removed} / {n_features} features, "
+          f"{keep.sum()} retained")
+    for group, n_pass in group_info:
+        print(f"    {group}: {n_pass} features meet SNR threshold")
+
+    return X[:, keep], mz[keep]
+
+
 def filter_low_variance(X, mz, percentile=25):
     """
     Remove features with low relative standard deviation (RSD).
@@ -209,7 +295,11 @@ def preprocess(X, normalization='tic', log_transform='log10', scaling='autoscale
         Sample normalization method. Options: 'tic', 'median', 'pqn', 'quantile', 'none'.
         See Wu & Li (2016) Sci Rep 6:38881 for a comparison of methods.
     log_transform : str
-        Transformation to apply. Options: 'log10', 'log2', 'sqrt', 'none'.
+        Transformation to apply.
+        Options: 'glog', 'log10', 'log2', 'sqrt', 'none'.
+        'glog' = arcsinh(X / lambda_) where lambda_ = 5th percentile of positive
+        values.  Linear near zero (suppresses baseline noise amplification),
+        log-like at high intensity, handles exact zeros without a half-min offset.
     scaling : str
         Scaling method. Options: 'autoscale', 'pareto', 'range', 'vast', 'level', 'none'.
         See van den Berg et al. (2006) BMC Genomics 7:142 for guidance.
@@ -261,7 +351,16 @@ def preprocess(X, normalization='tic', log_transform='log10', scaling='autoscale
     min_positive = X[X > 0].min() if (X > 0).any() else 1e-6
     half_min = min_positive / 2
 
-    if log_transform == 'log10':
+    if log_transform == 'glog':
+        # Generalised-log / asinh transform: arcsinh(x / lambda_)
+        # lambda_ = 5th percentile of positive values — a robust noise-floor
+        # estimate computed from all data (full-data path; per-fold lambda_ is
+        # fitted from the training fold inside the CV pipeline transformers).
+        pos_vals  = X[X > 0]
+        lambda_   = np.percentile(pos_vals, 5) if len(pos_vals) else 1.0
+        lambda_   = max(float(lambda_), 1e-10)
+        X = np.arcsinh(X / lambda_)
+    elif log_transform == 'log10':
         X = np.log10(X + half_min)
     elif log_transform == 'log2':
         X = np.log2(X + half_min)
@@ -271,7 +370,7 @@ def preprocess(X, normalization='tic', log_transform='log10', scaling='autoscale
         pass
     else:
         raise ValueError(f"Unknown log_transform: '{log_transform}'. "
-                         f"Choose from: 'log10', 'log2', 'sqrt', 'none'.")
+                         f"Choose from: 'glog', 'log10', 'log2', 'sqrt', 'none'.")
 
     # -- Scaling -----------------------------------------------------------------
     feat_mean = X.mean(axis=0)

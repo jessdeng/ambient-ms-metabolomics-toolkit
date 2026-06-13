@@ -25,7 +25,8 @@ import numpy as np
 
 import config
 from r_comparable.preprocessing import (load_experiment, bin_features,
-    filter_mass_range, filter_low_variance, filter_low_abundance, preprocess)
+    filter_mass_range, filter_snr_floor,
+    filter_low_variance, filter_low_abundance, preprocess)
 from r_comparable.pipeline import compute_vip_1comp, fit_plsda, plot_scores_3d, plot_vip
 from shared.classifier_comparison import (
     random_forest, svm_classify, gradient_boosting,
@@ -37,6 +38,16 @@ from shared.visualization import plot_spectrum_with_features
 
 BASE_DIR   = _ROOT
 EXPERIMENT = config.EXPERIMENT
+
+# ── Per-pipeline default resolution ──────────────────────────────────────────
+# The r_comparable pipeline must reproduce MetaboAnalyst behaviour out of the
+# box: log10, autoscale, no SNR floor.  If the user has NOT explicitly set
+# these keys in config.json we override to the MetaboAnalyst-matching values.
+# If they HAVE set them, their choice is honoured for both pipelines.
+_json_keys       = getattr(config, '_json_keys', set())
+_LOG_TRANSFORM   = config.LOG_TRANSFORM  if 'LOG_TRANSFORM'      in _json_keys else 'log10'
+_SCALING         = config.SCALING        if 'SCALING'            in _json_keys else 'autoscale'
+_SNR_ENABLED     = config.SNR_FLOOR_ENABLED if 'SNR_FLOOR_ENABLED' in _json_keys else False
 
 
 def main():
@@ -76,6 +87,21 @@ def main():
           f"{X_binned.shape[1]} features")
     mz_binned = mz.copy()
 
+    # ── 2c. SNR floor (optional; OFF by default for r_comparable) ────────────
+    # Available but disabled by default to preserve MetaboAnalyst parity.
+    # Enable with SNR_FLOOR_ENABLED=true in config.json.
+    if _SNR_ENABLED:
+        print(f"\n  SNR floor filter (threshold={config.SNR_THRESHOLD}, "
+              f"noise_q={config.NOISE_QUANTILE}, "
+              f"min_frac={config.MIN_FRACTION_IN_GROUP})")
+        X_binned, mz = filter_snr_floor(
+            X_binned, mz, y_labels,
+            snr_threshold=config.SNR_THRESHOLD,
+            noise_quantile=config.NOISE_QUANTILE,
+            min_fraction=config.MIN_FRACTION_IN_GROUP,
+        )
+        mz_binned = mz.copy()
+
     # ── 3. Filter (full-data copy — for descriptive PLS-DA/VIP/ensemble) ─────
     print(f"\n[3/12] Filtering (descriptive, full-data)")
     if config.VARIANCE_PERCENTILE > 0:
@@ -104,21 +130,25 @@ def main():
     # ── 4. Preprocess (full-data — descriptive only) ──────────────────────────
     print(f"\n[4/12] Preprocessing (descriptive, full-data)")
     print(f"  Normalization  : {config.NORMALIZATION}")
-    print(f"  Transformation : {config.LOG_TRANSFORM}")
-    print(f"  Scaling        : {config.SCALING}")
+    print(f"  Transformation : {_LOG_TRANSFORM}")
+    print(f"  Scaling        : {_SCALING}")
     X_norm = preprocess(X_filt.copy(), normalization=config.NORMALIZATION,
-                        log_transform=config.LOG_TRANSFORM, scaling='none')
+                        log_transform=_LOG_TRANSFORM, scaling='none')
     X = preprocess(X_filt, normalization=config.NORMALIZATION,
-                   log_transform=config.LOG_TRANSFORM, scaling=config.SCALING)
+                   log_transform=_LOG_TRANSFORM, scaling=_SCALING)
 
     # ── Grouping + leak-free preprocessor for cross-validation ───────────────
     groups     = make_groups(y_labels, sample_names)
     n_groups   = len(set(groups))
     prep_steps = make_preprocessor(
-        normalization=config.NORMALIZATION, log_transform=config.LOG_TRANSFORM,
-        scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
+        normalization=config.NORMALIZATION, log_transform=_LOG_TRANSFORM,
+        scaling=_SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
         abundance_percentile=config.ABUNDANCE_PERCENTILE,
-        prevalence_threshold=0.0,   # R-comparable path never applied prevalence
+        prevalence_threshold=0.0,        # R-comparable path: no prevalence filter
+        snr_floor_enabled=_SNR_ENABLED,  # OFF by default for r_comparable
+        snr_threshold=config.SNR_THRESHOLD,
+        noise_quantile=config.NOISE_QUANTILE,
+        min_fraction_in_group=config.MIN_FRACTION_IN_GROUP,
     )
     n_splits = auto_n_splits(y_labels, groups, desired=config.CV_FOLDS)
     print(f"\n  CV scheme: leave-one-biological-replicate-out "
@@ -180,7 +210,7 @@ def main():
     overlap_df, counts = feature_importance_analysis(
         X, y_labels, mz, safe_name, out_dir,
         top_n=config.TOP_N_FEATURES, X_norm=X_norm,
-        log_transform=config.LOG_TRANSFORM,
+        log_transform=_LOG_TRANSFORM,
     )
     plot_spectrum_with_features(X_binned, mz_binned, y_labels, overlap_df,
                                 experiment_name,

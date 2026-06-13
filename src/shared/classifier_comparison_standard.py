@@ -63,6 +63,62 @@ except Exception:
 # applies them on .transform(). Fitting any of these on the full dataset
 # reproduces standard/preprocessing.py exactly (verified: max abs diff 0.0).
 
+class SNRFloor(BaseEstimator, TransformerMixin):
+    """Remove features that never exceed the per-sample noise floor in any group.
+
+    Mirrors standard.preprocessing.filter_snr_floor.  Label-aware (uses y in
+    fit()) so it must live INSIDE the CV pipeline, fitted on the training fold
+    only to remain leak-free.  Applied on raw (pre-normalisation) counts.
+
+    Parameters
+    ----------
+    snr_threshold  : float — min SNR for a sample to count as detected (default 3)
+    noise_quantile : float — percentile of each row used to define the noise
+                     region for the MAD estimate (default 60)
+    min_fraction   : float — min fraction of group samples that must exceed the
+                     SNR threshold for the feature to be retained (default 0.5)
+    enabled        : bool  — set False to skip (pass-through transformer)
+    """
+    def __init__(self, snr_threshold=3, noise_quantile=60, min_fraction=0.5,
+                 enabled=True):
+        self.snr_threshold  = snr_threshold
+        self.noise_quantile = noise_quantile
+        self.min_fraction   = min_fraction
+        self.enabled        = enabled
+
+    def fit(self, X, y=None):
+        if not self.enabled or y is None or self.snr_threshold <= 0:
+            self.keep_ = np.ones(X.shape[1], dtype=bool)
+            return self
+        y = np.asarray(y)
+        n_samples, n_features = X.shape
+
+        # Per-sample robust noise
+        sigma = np.empty(n_samples)
+        for i in range(n_samples):
+            row      = X[i]
+            thr      = np.percentile(row, self.noise_quantile)
+            low_vals = row[row <= thr]
+            if len(low_vals) >= 2:
+                med = np.median(low_vals)
+                mad = np.median(np.abs(low_vals - med))
+                sigma[i] = 1.4826 * mad if mad > 0 else max(abs(med), 1e-10)
+            else:
+                sigma[i] = max(float(row.min()), 1e-10)
+
+        SNR  = X / sigma[:, np.newaxis]
+        keep = np.zeros(n_features, dtype=bool)
+        for g in np.unique(y):
+            passes = (SNR[y == g] >= self.snr_threshold).mean(axis=0) >= self.min_fraction
+            keep  |= passes
+        # Guard: never empty the matrix on a degenerate training fold
+        self.keep_ = keep if keep.any() else np.ones(n_features, dtype=bool)
+        return self
+
+    def transform(self, X):
+        return X[:, self.keep_]
+
+
 class PrevalenceFilter(BaseEstimator, TransformerMixin):
     """Remove features not genuinely detected in >= `threshold` of the samples
     of at least one class. Label-aware: uses y in .fit() so it must live INSIDE
@@ -161,14 +217,29 @@ class Normalizer(BaseEstimator, TransformerMixin):
 
 
 class LogTransform(BaseEstimator, TransformerMixin):
-    """Transformation: 'log10', 'log2', 'sqrt', 'none'."""
+    """Transformation: 'glog', 'log10', 'log2', 'sqrt', 'none'.
+
+    'glog' = arcsinh(X / lambda_) where lambda_ is the 5th percentile of
+    positive values in the TRAINING fold, fitted in fit() and reused in
+    transform().  This is equivalent to preprocess(log_transform='glog') when
+    fit() and preprocess() see the same data (verified: max abs diff 0.0).
+    """
     def __init__(self, method='log10'):
         self.method = method
+
     def fit(self, X, y=None):
-        mp = X[X > 0].min() if (X > 0).any() else 1e-6
-        self.half_ = mp / 2
+        if self.method in ('log10', 'log2'):
+            mp = X[X > 0].min() if (X > 0).any() else 1e-6
+            self.half_ = mp / 2
+        elif self.method == 'glog':
+            pos = X[X > 0]
+            lam = np.percentile(pos, 5) if len(pos) else 1.0
+            self.lambda_ = max(float(lam), 1e-10)
         return self
+
     def transform(self, X):
+        if self.method == 'glog':
+            return np.arcsinh(X / self.lambda_)
         if self.method == 'log10':
             return np.log10(X + self.half_)
         if self.method == 'log2':
@@ -233,19 +304,22 @@ def make_groups(y_labels, names):
 def make_preprocessor(normalization='tic', log_transform='log10',
                       scaling='autoscale', variance_percentile=25,
                       abundance_percentile=5, prevalence_threshold=0.5,
-                      prevalence_min_intensity=0.0):
+                      prevalence_min_intensity=0.0,
+                      snr_floor_enabled=False, snr_threshold=3,
+                      noise_quantile=60, min_fraction_in_group=0.5):
     """
     Return the ordered list of (name, transformer) steps that reproduce the
     full preprocessing chain. Order matches standard/run_analysis.py:
-    prevalence filter -> variance filter -> abundance filter -> normalise ->
-    transform -> scale.
+    SNR floor -> prevalence filter -> variance filter -> abundance filter ->
+    normalise -> transform -> scale.
 
-    The prevalence filter is label-aware and is now part of this pipeline so it
-    is fit on the training fold only (previously it ran once on the full matrix
-    in run_analysis.py, which leaked test-fold labels into feature selection).
-    Pass prevalence_threshold=0 to disable it.
+    SNRFloor and PrevalenceFilter are label-aware and live INSIDE the pipeline
+    so they are fit on the training fold only (leak-free).
+    Pass snr_floor_enabled=False or prevalence_threshold=0 to disable them.
     """
     return [
+        ('snrfloor',  SNRFloor(snr_threshold, noise_quantile,
+                               min_fraction_in_group, snr_floor_enabled)),
         ('prevalence', PrevalenceFilter(prevalence_threshold,
                                         prevalence_min_intensity)),
         ('variance',  VarianceFilter(variance_percentile)),
@@ -534,6 +608,10 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     elif log_transform == 'sqrt':
         lin1 = top1 ** 2; lin2 = top2 ** 2
         overlap_df['mean_margin'] = np.where(lin2 > 0, lin1 / lin2, np.nan)
+    elif log_transform == 'glog':
+        # Invert arcsinh: x_linear ∝ sinh(arcsinh_val); lambda_ cancels in ratio
+        s1 = np.sinh(top1); s2 = np.sinh(top2)
+        overlap_df['mean_margin'] = np.where(np.abs(s2) > 1e-9, s1 / s2, np.nan)
     else:
         overlap_df['mean_margin'] = np.where(top2 > 0, top1 / top2, np.nan)
 

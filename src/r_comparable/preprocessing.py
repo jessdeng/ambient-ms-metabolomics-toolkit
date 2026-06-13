@@ -21,6 +21,8 @@ Usage:
 from standard.preprocessing import (
     load_experiment,
     filter_mass_range,
+    filter_prevalence,
+    filter_snr_floor,
     filter_low_variance,
     filter_low_abundance,
     preprocess,
