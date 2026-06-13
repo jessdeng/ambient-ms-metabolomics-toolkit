@@ -28,7 +28,7 @@ apply_style()
 
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold
 from sklearn.metrics import accuracy_score
 from standard.preprocessing import load_experiment, bin_features, filter_low_variance, filter_low_abundance, preprocess
 
@@ -95,6 +95,69 @@ def compute_vip_1comp(X, y_labels):
     vip    = np.sqrt(n_features * (W_norm ** 2 @ SS) / SS.sum())
 
     return vip
+
+
+def compute_plsda_q2(X, y_labels, n_components, groups=None, n_splits=5,
+                     random_state=42):
+    """Cross-validated Q^2 for PLS-DA: Q^2 = 1 - PRESS/TSS on the one-hot Y.
+
+    PRESS is the held-out prediction error summed over folds; TSS uses each
+    training fold's Y mean as the no-information predictor. If `groups` is given,
+    folds respect the biological colony (StratifiedGroupKFold) so technical
+    replicates never straddle the split; otherwise StratifiedKFold is used.
+    Falls back to ungrouped folds if a grouped split is infeasible (e.g. under a
+    permuted labelling).
+    """
+    le = LabelEncoder()
+    y  = le.fit_transform(y_labels)
+    Y  = OneHotEncoder(sparse_output=False).fit_transform(y.reshape(-1, 1))
+    n_comp = int(max(1, min(n_components, X.shape[1], X.shape[0] - 2)))
+
+    def _splits():
+        if groups is not None:
+            k = int(max(2, min(n_splits, np.unique(groups).size)))
+            try:
+                return list(StratifiedGroupKFold(
+                    n_splits=k, shuffle=True,
+                    random_state=random_state).split(X, y, groups))
+            except Exception:
+                pass
+        k = int(max(2, min(n_splits, np.min(np.bincount(y)))))
+        return list(StratifiedKFold(n_splits=k, shuffle=True,
+                                    random_state=random_state).split(X, y))
+
+    press = 0.0
+    tss   = 0.0
+    for tr, te in _splits():
+        pls = PLSRegression(n_components=min(n_comp, len(tr) - 1), scale=False)
+        pls.fit(X[tr], Y[tr])
+        Y_hat = pls.predict(X[te])
+        press += np.sum((Y[te] - Y_hat) ** 2)
+        tss   += np.sum((Y[te] - Y[tr].mean(axis=0)) ** 2)
+    return 1.0 - press / tss if tss > 0 else np.nan
+
+
+def evaluate_plsda_q2(X, y_labels, n_components, groups=None, n_splits=5,
+                      n_perm=200, random_state=42):
+    """Observed Q^2 plus a label-permutation null and its empirical p-value.
+
+    Returns (q2_observed, null_q2_array, p_value). The p-value uses the
+    +1/+1 estimator (Phipson & Smyth 2010): p = (#{null >= obs} + 1)/(n + 1).
+    """
+    q2_obs = compute_plsda_q2(X, y_labels, n_components, groups=groups,
+                              n_splits=n_splits, random_state=random_state)
+    rng  = np.random.default_rng(random_state)
+    null = np.empty(n_perm, dtype=float)
+    y_arr = np.asarray(y_labels)
+    for i in range(n_perm):
+        yp = rng.permutation(y_arr)
+        null[i] = compute_plsda_q2(X, yp, n_components, groups=groups,
+                                   n_splits=n_splits,
+                                   random_state=random_state + i + 1)
+    valid = null[np.isfinite(null)]
+    p_value = ((np.sum(valid >= q2_obs) + 1.0) / (valid.size + 1.0)
+               if valid.size else np.nan)
+    return q2_obs, null, p_value
 
 
 def plot_scores_3d(T, pls, y_labels, classes, experiment_name, out_path):

@@ -192,6 +192,40 @@ USE_RIDGE               = True
 # 5 is standard. Use a smaller number (e.g. 3) if you have very few samples.
 CV_FOLDS = 5
 
+# Repeated grouped CV — with only a few colonies per class each single split is
+# noisy (one test fold = one colony). Repeating the grouped CV with different
+# shuffles and averaging stabilises the estimate. 1 = no repeats (original
+# behaviour); 10 is a good default for small designs.
+N_CV_REPEATS = 10
+
+# ── Univariate statistics & FDR ──────────────────────────────────────────────────
+# Per-feature significance testing added alongside the ensemble ranking.
+#   'auto'     — Welch's t-test (2 groups) / one-way ANOVA (>2 groups)
+#   'ttest'    — same parametric tests as 'auto'
+#   'wilcoxon' — Wilcoxon rank-sum (2 groups) / Kruskal-Wallis (>2 groups)
+# Benjamini-Hochberg FDR q-values are always reported next to the raw p-values.
+UNIVARIATE_TEST = 'auto'
+
+# ── Feature-selection stability (bootstrap) ───────────────────────────────────────
+# Resamples colonies with replacement, re-fits the ensemble, and reports how
+# often each feature is selected — out-of-sample evidence the candidate list is
+# reproducible. Slower (re-fits the ensemble N_BOOTSTRAP times). Set False to skip.
+RUN_FEATURE_STABILITY = True
+N_BOOTSTRAP = 200
+
+# ── Overlap permutation null ──────────────────────────────────────────────────────
+# Permutes labels and recomputes the cross-method overlap to calibrate how many
+# features would corroborate by chance (the linear methods are collinear, so the
+# raw overlap overstates independence). Reports observed vs null + empirical p.
+RUN_OVERLAP_PERMUTATION = True
+N_OVERLAP_PERMUTATIONS = 200
+
+# ── PLS-DA Q² validation ──────────────────────────────────────────────────────────
+# Cross-validated Q² for the descriptive PLS-DA plus a permuted-Q² null, so the
+# VIP-based prioritisation is reported with a calibrated model-quality metric.
+RUN_PLSDA_Q2 = True
+N_Q2_PERMUTATIONS = 200
+
 
 # ── Feature Importance Overlap ─────────────────────────────────────────────────
 # How many top features to take from each method when looking for overlap.

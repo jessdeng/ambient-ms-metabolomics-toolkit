@@ -152,7 +152,8 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
 
     perm_accs = np.array(perm_accs)
     valid     = ~np.isnan(perm_accs)
-    p_value   = (perm_accs[valid] >= obs_acc).sum() / valid.sum()
+    # +1/+1 (Phipson & Smyth 2010): a permutation p-value must never be exactly 0.
+    p_value   = ((perm_accs[valid] >= obs_acc).sum() + 1) / (valid.sum() + 1)
 
     print(f"  Permuted mean acc : {perm_accs[valid].mean():.3f} +/- "
           f"{perm_accs[valid].std():.3f}")

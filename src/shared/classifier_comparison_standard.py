@@ -364,18 +364,41 @@ def _encode(y_labels):
     return LabelEncoder().fit_transform(y_labels)
 
 
-def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits):
+def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits,
+                    n_repeats=1, return_metrics=False):
     """
     Leak-free, group-aware CV. `X_binned` is the binned matrix BEFORE any
     filtering/normalisation/scaling; the preprocessor is cloned and fit inside
-    each fold. Returns (test_accs, train_accs).
+    each fold.
+
+    Repeated CV: with `n_repeats > 1` the StratifiedGroupKFold is re-run with a
+    different shuffle each repeat (seed `_SEED + r`) and all fold scores are
+    pooled — this damps the high variance of having only a few colonies/class.
+    Both accuracy and balanced accuracy are collected.
+
+    Returns (test_accuracy, train_accuracy) by default, or — when
+    `return_metrics=True` — a dict with pooled 'test_accuracy',
+    'train_accuracy', and 'test_balanced_accuracy' arrays.
     """
-    steps = [(name, clone(t)) for name, t in prep_steps] + [('clf', clone(estimator))]
-    pipe = Pipeline(steps)
-    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=_SEED)
-    res = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
-                         scoring='accuracy', return_train_score=True)
-    return res['test_score'], res['train_score']
+    scoring = {'acc': 'accuracy', 'bal': 'balanced_accuracy'}
+    test_acc, train_acc, test_bal = [], [], []
+    for r in range(max(1, n_repeats)):
+        steps = [(name, clone(t)) for name, t in prep_steps] + [('clf', clone(estimator))]
+        pipe = Pipeline(steps)
+        sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
+                                    random_state=_SEED + r)
+        res = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
+                             scoring=scoring, return_train_score=True)
+        test_acc.append(res['test_acc'])
+        train_acc.append(res['train_acc'])
+        test_bal.append(res['test_bal'])
+    test_acc  = np.concatenate(test_acc)
+    train_acc = np.concatenate(train_acc)
+    test_bal  = np.concatenate(test_bal)
+    if return_metrics:
+        return {'test_accuracy': test_acc, 'train_accuracy': train_acc,
+                'test_balanced_accuracy': test_bal}
+    return test_acc, train_acc
 
 
 def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=_SEED):
@@ -391,11 +414,13 @@ def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=_SEED):
     return np.array(test_accs), np.array(train_accs)
 
 
-def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps):
+def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps,
+              n_repeats=1, return_metrics=False):
     """Use corrected grouped/leak-free CV when groups+prep_steps are supplied;
     otherwise fall back to the legacy path with a warning."""
     if groups is not None and prep_steps is not None:
-        return _run_grouped_cv(estimator, X, y, groups, prep_steps, n_splits)
+        return _run_grouped_cv(estimator, X, y, groups, prep_steps, n_splits,
+                               n_repeats=n_repeats, return_metrics=return_metrics)
     warnings.warn(
         "Running LEGACY ungrouped CV on pre-preprocessed X. This reintroduces "
         "pseudoreplication and preprocessing leakage. Pass groups= and "
@@ -407,48 +432,60 @@ def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps):
 # -- Individual classifiers ------------------------------------------------------
 # New signature: pass the BINNED matrix as X, plus groups= and prep_steps=.
 
-def RandomForest(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
+def RandomForest(X, y_labels, n_splits=3, groups=None, prep_steps=None,
+                 random_state=_SEED, n_repeats=1, return_metrics=False):
     y = _encode(y_labels)
     est = RandomForestClassifier(n_estimators=100, random_state=random_state)
     return _dispatch(est, lambda: RandomForestClassifier(n_estimators=100, random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
-def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
+def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
+                 random_state=_SEED, n_repeats=1, return_metrics=False):
     y = _encode(y_labels)
     est = SVC(kernel='linear', random_state=random_state)
     return _dispatch(est, lambda: SVC(kernel='linear', random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
-def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
+def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None,
+                      random_state=_SEED, n_repeats=1, return_metrics=False):
     y = _encode(y_labels)
     est = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
                                      max_depth=3, random_state=random_state)
     return _dispatch(est, lambda: GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
                      max_depth=3, random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
-def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
+def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None,
+                        random_state=_SEED, n_repeats=1, return_metrics=False):
     y = _encode(y_labels)
     est = LogisticRegression(max_iter=1000, random_state=random_state)
     return _dispatch(est, lambda: LogisticRegression(max_iter=1000, random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
-def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
+def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
+                 random_state=_SEED, n_repeats=1, return_metrics=False):
     y = _encode(y_labels)
     est = LinearDiscriminantAnalysis()
     return _dispatch(est, lambda: LinearDiscriminantAnalysis(),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
-def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None, random_state=_SEED):
+def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
+                   random_state=_SEED, n_repeats=1, return_metrics=False):
     y = _encode(y_labels)
     est = RidgeClassifier()
     return _dispatch(est, lambda: RidgeClassifier(),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 # -- Plotting --------------------------------------------------------------------
@@ -509,15 +546,30 @@ def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
 # -- Feature importance overlap (DESCRIPTIVE -- full-data fit is correct here) ---
 
 def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
-                                top_n=50, X_norm=None, log_transform='log10'):
+                                top_n=50, X_norm=None, log_transform='log10',
+                                X_filt_raw=None, groups=None,
+                                normalization='tic', scaling='autoscale',
+                                univariate_test='auto',
+                                compute_stability=False, n_boot=200,
+                                compute_overlap_null=False, n_overlap_perm=200,
+                                random_state=_SEED):
     """
     Final ensemble feature ranking. Fits RF, SVM, GB, LR, Ridge and PLS-DA VIP
     on the FULL preprocessed dataset and reports features appearing in the top
     `top_n` of >=2 of the 6 methods.
 
     This is the reported candidate list, not a generalisation estimate, so it is
-    fit on all data by design. Unchanged from the original implementation other
-    than this note. `X` here is the fully preprocessed matrix (as before).
+    fit on all data by design. `X` is the fully preprocessed (scaled) matrix.
+
+    Statistical-rigor columns (added):
+      * Univariate fold-change, p-value and Benjamini-Hochberg q-value
+        (computed on `X_norm`, the unscaled log-intensity matrix) when X_norm
+        is provided.
+      * `selection_frequency` — colony-bootstrap stability — when
+        compute_stability=True and X_filt_raw + groups are supplied.
+      * `overlap_null_freq` — per-feature label-permutation selection rate — and
+        a printed observed-vs-null overlap comparison when
+        compute_overlap_null=True.
     """
     le = LabelEncoder()
     y = le.fit_transform(y_labels)
@@ -627,8 +679,90 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
         else:                    direction.append('mixed')
     overlap_df['ridge_direction'] = direction
 
-    overlap_df = overlap_df.sort_values('n_methods', ascending=False)
+    # -- Statistical-rigor columns ------------------------------------------------
+    _attach_feature_statistics(
+        overlap_df, overlap_list, counts, X, X_norm, y_labels, mz,
+        top_n=top_n, log_transform=log_transform, univariate_test=univariate_test,
+        X_filt_raw=X_filt_raw, groups=groups, normalization=normalization,
+        scaling=scaling, compute_stability=compute_stability, n_boot=n_boot,
+        compute_overlap_null=compute_overlap_null, n_overlap_perm=n_overlap_perm,
+        random_state=random_state,
+    )
+
+    if 'q_value_BH' in overlap_df.columns:
+        overlap_df = overlap_df.sort_values(['q_value_BH', 'n_methods'],
+                                            ascending=[True, False])
+    else:
+        overlap_df = overlap_df.sort_values('n_methods', ascending=False)
     csv_path = os.path.join(out_dir, f'feature_overlap_{safe_name}.csv')
     overlap_df.to_csv(csv_path, index=False, encoding='utf-8')
     print(f"  Saved -> {csv_path}")
     return overlap_df, counts
+
+
+def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
+                               y_labels, mz, top_n, log_transform,
+                               univariate_test, X_filt_raw, groups,
+                               normalization, scaling, compute_stability, n_boot,
+                               compute_overlap_null, n_overlap_perm, random_state):
+    """Add univariate FDR, bootstrap stability, and overlap-null columns to the
+    candidate dataframe in place. Shared by both classifier_comparison modules."""
+    from src.shared.feature_stats import (
+        univariate_feature_stats, bootstrap_selection_frequency,
+        overlap_permutation_null, empirical_p,
+    )
+    from standard.preprocessing import preprocess as _preprocess
+
+    overlap_list = list(overlap_list)
+
+    # 1. Univariate fold-change + test + BH-FDR (over ALL features, then subset).
+    if X_norm is not None:
+        stats = univariate_feature_stats(X_norm, y_labels,
+                                         log_transform=log_transform,
+                                         test=univariate_test)
+        overlap_df['fold_change']      = stats['fold_change'][overlap_list]
+        overlap_df['log2_fold_change'] = stats['log2_fold_change'][overlap_list]
+        overlap_df['p_value']          = stats['p_value'][overlap_list]
+        overlap_df['q_value_BH']       = stats['q_value'][overlap_list]
+        overlap_df['fc_top_group']     = stats['top_group'][overlap_list]
+        overlap_df['fc_bottom_group']  = stats['bottom_group'][overlap_list]
+        overlap_df['univariate_test']  = stats['test_name']
+        n_sig = int((stats['q_value'][overlap_list] < 0.05).sum())
+        print(f"  Univariate {stats['test_name']} + BH-FDR: "
+              f"{n_sig}/{len(overlap_list)} candidates at q < 0.05")
+    else:
+        print("  [stats] X_norm not provided -- skipping univariate FDR columns")
+
+    # 2. Colony-bootstrap selection-frequency stability.
+    if compute_stability and X_filt_raw is not None and groups is not None:
+        print(f"  Bootstrap stability ({n_boot} colony resamples) ...")
+        freq, n_used = bootstrap_selection_frequency(
+            X_filt_raw, y_labels, groups, _preprocess, compute_vip_1comp,
+            normalization=normalization, log_transform=log_transform,
+            scaling=scaling, top_n=top_n, min_methods=2, n_boot=n_boot,
+            seed=random_state,
+        )
+        overlap_df['selection_frequency'] = freq[overlap_list]
+        n_stable = int((freq[overlap_list] >= 0.8).sum())
+        print(f"    {n_used} usable resamples; {n_stable}/{len(overlap_list)} "
+              f"candidates selected in >= 80% of resamples")
+    elif compute_stability:
+        print("  [stats] stability requested but X_filt_raw/groups missing -- skipped")
+
+    # 3. Label-permutation null for the cross-method overlap counts.
+    if compute_overlap_null:
+        print(f"  Overlap permutation null ({n_overlap_perm} permutations) ...")
+        null = overlap_permutation_null(
+            X, y_labels, compute_vip_1comp, top_n=top_n,
+            k_values=(2, 3, 4, 5, 6), n_perm=n_overlap_perm, seed=random_state,
+        )
+        overlap_df['overlap_null_freq'] = null['per_feature_null_freq'][overlap_list]
+        print("    observed vs null overlap size (features in >= k of 6 methods):")
+        for k in (2, 3, 4, 5, 6):
+            obs_k = int(sum(1 for c in counts.values() if c >= k))
+            nk = null['null_counts'][k]
+            pk = empirical_p(obs_k, nk)
+            nk_valid = nk[np.isfinite(nk)]
+            mean_null = float(nk_valid.mean()) if nk_valid.size else float('nan')
+            print(f"      >= {k}: observed={obs_k:4d}  null_mean={mean_null:6.1f}  "
+                  f"p={pk:.4f}")

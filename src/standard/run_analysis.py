@@ -16,7 +16,8 @@ import config
 from standard.preprocessing import (load_experiment, bin_features,
     filter_mass_range, filter_snr_floor, filter_prevalence,
     filter_low_variance, filter_low_abundance, preprocess)
-from standard.pipeline import compute_vip_1comp, fit_plsda, plot_scores_3d, plot_vip
+from standard.pipeline import (compute_vip_1comp, fit_plsda, plot_scores_3d,
+                               plot_vip, evaluate_plsda_q2)
 from shared.classifier_comparison_standard import (
     RandomForest, svm_classify, gradient_boosting,
     logistic_regression, lda_classify, ridge_classify,
@@ -62,39 +63,39 @@ def main():
     print(f"  After m/z range filter ({config.MZ_MIN}--{config.MZ_MAX} Da): "
           f"{X_binned.shape[1]} features")
 
-    # -- 2c. SNR floor (optional) -------------------------------------------------
-    # Applied on raw binned intensities — strips flat baseline bins that never
-    # rise above the per-sample noise floor in any condition group.  Does NOT
-    # remove genuine low-abundance or single-condition features.
-    # Uses y_labels before the split (same justification as filter_prevalence).
+    # -- 2c/2d. Supervised filters -- DESCRIPTIVE COPY ONLY (no CV leak) ----------
+    # The SNR floor and the prevalence filter are BOTH label-aware (supervised):
+    # they keep a feature based on its per-group detection/SNR using y_labels.
+    # Applying either to the matrix that feeds cross-validation would select
+    # features using the labels of samples that later appear in the test folds —
+    # exactly the leak that was previously fixed for the prevalence filter and
+    # had been reintroduced by the global SNR floor.
+    #
+    # Fix: X_binned (mass-range-filtered, RAW) is fed UNTOUCHED to the grouped CV,
+    # where SNRFloor and PrevalenceFilter are re-fit per training fold by the
+    # in-pipeline transformers (make_preprocessor below). The supervised filters
+    # are applied here only to a separate descriptive copy (X_desc) used by the
+    # full-data PLS-DA / VIP / ensemble, where full-data fitting is acknowledged.
+    # Both run on raw counts BEFORE any log-transform so zeros stay zeros.
+    X_desc, mz_desc = X_binned.copy(), mz_binned.copy()
+
     if config.SNR_FLOOR_ENABLED:
-        print(f"\n  SNR floor filter (threshold={config.SNR_THRESHOLD}, "
+        print(f"\n  SNR floor filter (descriptive copy only; re-fit per-fold in CV) "
+              f"(threshold={config.SNR_THRESHOLD}, "
               f"noise_q={config.NOISE_QUANTILE}, "
               f"min_frac={config.MIN_FRACTION_IN_GROUP})")
-        X_binned, mz_binned = filter_snr_floor(
-            X_binned, mz_binned, y_labels,
+        X_desc, mz_desc = filter_snr_floor(
+            X_desc, mz_desc, y_labels,
             snr_threshold=config.SNR_THRESHOLD,
             noise_quantile=config.NOISE_QUANTILE,
             min_fraction=config.MIN_FRACTION_IN_GROUP,
         )
 
-    # -- 2d. Prevalence filter -- DESCRIPTIVE PATH ONLY ---------------------------
-    # Drops features that only survive due to half-min imputation. The prevalence
-    # filter is label-aware (supervised), so it must NOT be applied to the matrix
-    # that feeds cross-validation: doing so once on the full data leaks test-fold
-    # labels into feature selection. The CV path therefore keeps the RAW binned
-    # matrix (X_binned) and applies prevalence INSIDE the pipeline, fit per-fold
-    # (see make_preprocessor(prevalence_threshold=...)). Here we build a separate
-    # full-data copy (X_desc) used only by the descriptive PLS-DA/VIP/ensemble,
-    # where full-data fitting is acknowledged and acceptable.
-    # Must run on raw counts BEFORE any log-transform so zeros stay zeros.
     if config.PREVALENCE_THRESHOLD > 0.0:
         X_desc, mz_desc = filter_prevalence(
-            X_binned, mz_binned, y_labels,
+            X_desc, mz_desc, y_labels,
             threshold=config.PREVALENCE_THRESHOLD,
         )
-    else:
-        X_desc, mz_desc = X_binned.copy(), mz_binned.copy()
 
     # -- 3. Filter (FULL-DATA copy -- for the descriptive PLS-DA/VIP/ensemble) --
     # These outputs are reported models fit on all data, so full-data
@@ -158,6 +159,17 @@ def main():
     plot_vip(vip, mz, X_filt_raw, y_labels, config.N_TOP_VIP, experiment_name,
              out_path=os.path.join(out_dir, f"vip_scores_{safe_name}.png"))
 
+    # -- 6b. PLS-DA Q^2 + permuted-Q^2 (descriptive model quality) ---------------
+    if getattr(config, 'RUN_PLSDA_Q2', False):
+        print(f"\n  PLS-DA cross-validated Q^2 (+ {config.N_Q2_PERMUTATIONS}-permutation null)")
+        q2, _q2_null, q2_p = evaluate_plsda_q2(
+            X, y_labels, config.N_PLSDA_COMPONENTS, groups=groups,
+            n_splits=n_splits, n_perm=config.N_Q2_PERMUTATIONS,
+            random_state=config.RANDOM_SEED,
+        )
+        print(f"    Q^2 = {q2:.3f}   permuted-Q^2 p = {q2_p:.4f} "
+              f"({'significant' if q2_p < 0.05 else 'NOT significant'} at a=0.05)")
+
     # -- 7-11. Classifiers (CORRECTED: grouped + leak-free) ----------------------
     all_classifiers = {
         'Random Forest':       (config.USE_RANDOM_FOREST,       RandomForest),
@@ -168,24 +180,34 @@ def main():
         'Ridge':               (config.USE_RIDGE,               ridge_classify),
     }
 
+    n_repeats = getattr(config, 'N_CV_REPEATS', 1)
+    print(f"  Repeated grouped CV: {n_repeats} repeat(s) x {n_splits} folds")
     results = {}
+    balanced = {}
     step = 7
     for name, (enabled, fn) in all_classifiers.items():
         if enabled:
             print(f"\n[{step}/12] {name}")
-            test_accs, train_accs = fn(
+            metrics = fn(
                 X_binned, y_labels, n_splits=n_splits,
                 groups=groups, prep_steps=prep_steps,
+                n_repeats=n_repeats, return_metrics=True,
             )
-            results[name] = (test_accs, train_accs)
-            print(f"  Test  accuracy: {test_accs.mean():.3f} +/- {test_accs.std():.3f}")
-            print(f"  Train accuracy: {train_accs.mean():.3f} +/- {train_accs.std():.3f}")
+            test_accs  = metrics['test_accuracy']
+            train_accs = metrics['train_accuracy']
+            bal_accs   = metrics['test_balanced_accuracy']
+            results[name]  = (test_accs, train_accs)
+            balanced[name] = bal_accs
+            print(f"  Test  accuracy         : {test_accs.mean():.3f} +/- {test_accs.std():.3f}")
+            print(f"  Test  balanced accuracy: {bal_accs.mean():.3f} +/- {bal_accs.std():.3f}")
+            print(f"  Train accuracy         : {train_accs.mean():.3f} +/- {train_accs.std():.3f}")
             step += 1
 
     results_path = os.path.join(out_dir, f"classifier_results_{safe_name}.npz")
     np.savez(results_path,
              **{f"{name}__test":  test_accs for name, (test_accs, _) in results.items()},
-             **{f"{name}__train": train_accs for name, (_, train_accs) in results.items()})
+             **{f"{name}__train": train_accs for name, (_, train_accs) in results.items()},
+             **{f"{name}__balanced": balanced[name] for name in results})
     print(f"\n  Classifier results saved -> {results_path}")
 
     # -- 11. Plot comparison (chance line at 1/n_classes) ------------------------
@@ -199,6 +221,14 @@ def main():
     overlap_df, counts = feature_importance_analysis(
         X, y_labels, mz, safe_name, out_dir,
         top_n=config.TOP_N_FEATURES, X_norm=X_norm, log_transform=config.LOG_TRANSFORM,
+        X_filt_raw=X_filt_raw, groups=groups,
+        normalization=config.NORMALIZATION, scaling=config.SCALING,
+        univariate_test=getattr(config, 'UNIVARIATE_TEST', 'auto'),
+        compute_stability=getattr(config, 'RUN_FEATURE_STABILITY', False),
+        n_boot=getattr(config, 'N_BOOTSTRAP', 200),
+        compute_overlap_null=getattr(config, 'RUN_OVERLAP_PERMUTATION', False),
+        n_overlap_perm=getattr(config, 'N_OVERLAP_PERMUTATIONS', 200),
+        random_state=config.RANDOM_SEED,
     )
     plot_spectrum_with_features(X_binned, mz_binned, y_labels, overlap_df, experiment_name,
                                 out_path=os.path.join(out_dir, f"spectrum_features_{safe_name}.png"))

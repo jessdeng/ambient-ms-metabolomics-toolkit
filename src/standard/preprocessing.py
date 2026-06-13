@@ -268,7 +268,14 @@ def filter_low_variance(X, mz, percentile=25):
     Remove features with low relative standard deviation (RSD).
     Matches MetaboAnalyst's 'Interquartile range' filter at 25%.
     """
-    rsd = X.std(axis=0) / X.mean(axis=0)
+    mean = X.mean(axis=0)
+    # Zero-guard: features with a (near-)zero mean would make RSD blow up to
+    # inf/NaN and corrupt the percentile threshold. Floor the denominator and
+    # force RSD=0 for those features so they sort to the bottom and are dropped.
+    mean_safe = np.where(np.abs(mean) < 1e-12, 1e-12, mean)
+    rsd = X.std(axis=0) / mean_safe
+    rsd = np.where(np.abs(mean) < 1e-12, 0.0, rsd)
+    rsd = np.where(np.isfinite(rsd), rsd, 0.0)
     threshold = np.percentile(rsd, percentile)
     keep = rsd > threshold
     return X[:, keep], mz[keep]

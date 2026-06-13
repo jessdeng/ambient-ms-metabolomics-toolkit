@@ -27,7 +27,8 @@ import config
 from r_comparable.preprocessing import (load_experiment, bin_features,
     filter_mass_range, filter_snr_floor,
     filter_low_variance, filter_low_abundance, preprocess)
-from r_comparable.pipeline import compute_vip_1comp, fit_plsda, plot_scores_3d, plot_vip
+from r_comparable.pipeline import (compute_vip_1comp, fit_plsda, plot_scores_3d,
+                                   plot_vip, evaluate_plsda_q2)
 from shared.classifier_comparison import (
     random_forest, svm_classify, gradient_boosting,
     logistic_regression, lda_classify, ridge_classify,
@@ -88,29 +89,33 @@ def main():
     mz_binned = mz.copy()
 
     # ── 2c. SNR floor (optional; OFF by default for r_comparable) ────────────
-    # Available but disabled by default to preserve MetaboAnalyst parity.
-    # Enable with SNR_FLOOR_ENABLED=true in config.json.
+    # The SNR floor is label-aware (supervised), so applying it to the matrix
+    # that feeds cross-validation leaks test-fold labels into feature selection.
+    # It is therefore applied ONLY to the descriptive copy (X_desc) below; inside
+    # the CV the in-pipeline SNRFloor transformer re-fits it per training fold.
+    # X_binned (mass-range-filtered, RAW) is fed UNTOUCHED to the grouped CV.
+    X_desc, mz_desc = X_binned.copy(), mz_binned.copy()
     if _SNR_ENABLED:
-        print(f"\n  SNR floor filter (threshold={config.SNR_THRESHOLD}, "
+        print(f"\n  SNR floor filter (descriptive copy only; re-fit per-fold in CV) "
+              f"(threshold={config.SNR_THRESHOLD}, "
               f"noise_q={config.NOISE_QUANTILE}, "
               f"min_frac={config.MIN_FRACTION_IN_GROUP})")
-        X_binned, mz = filter_snr_floor(
-            X_binned, mz, y_labels,
+        X_desc, mz_desc = filter_snr_floor(
+            X_desc, mz_desc, y_labels,
             snr_threshold=config.SNR_THRESHOLD,
             noise_quantile=config.NOISE_QUANTILE,
             min_fraction=config.MIN_FRACTION_IN_GROUP,
         )
-        mz_binned = mz.copy()
 
     # ── 3. Filter (full-data copy — for descriptive PLS-DA/VIP/ensemble) ─────
     print(f"\n[3/12] Filtering (descriptive, full-data)")
     if config.VARIANCE_PERCENTILE > 0:
-        X_filt, mz = filter_low_variance(X_binned, mz.copy(),
+        X_filt, mz = filter_low_variance(X_desc, mz_desc.copy(),
                                          percentile=config.VARIANCE_PERCENTILE)
         print(f"  After variance filter ({config.VARIANCE_PERCENTILE}%): "
               f"{X_filt.shape[1]} features")
     else:
-        X_filt, mz = X_binned.copy(), mz.copy()
+        X_filt, mz = X_desc.copy(), mz_desc.copy()
         print("  Variance filter disabled")
 
     if config.ABUNDANCE_PERCENTILE > 0:
@@ -167,6 +172,17 @@ def main():
     plot_vip(vip, mz, X_filt_raw, y_labels, config.N_TOP_VIP, experiment_name,
              out_path=os.path.join(out_dir, f"vip_scores_{safe_name}.png"))
 
+    # ── 6b. PLS-DA Q^2 + permuted-Q^2 (descriptive model quality) ─────────────
+    if getattr(config, 'RUN_PLSDA_Q2', False):
+        print(f"\n  PLS-DA cross-validated Q^2 (+ {config.N_Q2_PERMUTATIONS}-permutation null)")
+        q2, _q2_null, q2_p = evaluate_plsda_q2(
+            X, y_labels, config.N_PLSDA_COMPONENTS, groups=groups,
+            n_splits=n_splits, n_perm=config.N_Q2_PERMUTATIONS,
+            random_state=config.RANDOM_SEED,
+        )
+        print(f"    Q^2 = {q2:.3f}   permuted-Q^2 p = {q2_p:.4f} "
+              f"({'significant' if q2_p < 0.05 else 'NOT significant'} at a=0.05)")
+
     # ── 7–11. Classifiers (grouped + leak-free) ───────────────────────────────
     all_classifiers = {
         'Random Forest':       (config.USE_RANDOM_FOREST,       random_forest),
@@ -177,25 +193,35 @@ def main():
         'Ridge':               (config.USE_RIDGE,               ridge_classify),
     }
 
+    n_repeats = getattr(config, 'N_CV_REPEATS', 1)
+    print(f"  Repeated grouped CV: {n_repeats} repeat(s) x {n_splits} folds")
     results = {}
+    balanced = {}
     step = 7
     for name, (enabled, fn) in all_classifiers.items():
         if enabled:
             print(f"\n[{step}/12] {name}")
-            test_accs, train_accs = fn(
+            metrics = fn(
                 X_binned, y_labels, n_splits=n_splits,
                 groups=groups, prep_steps=prep_steps,
+                n_repeats=n_repeats, return_metrics=True,
             )
-            results[name] = (test_accs, train_accs)
-            print(f"  Test  accuracy: {test_accs.mean():.3f} +/- {test_accs.std():.3f}")
-            print(f"  Train accuracy: {train_accs.mean():.3f} +/- {train_accs.std():.3f}")
+            test_accs  = metrics['test_accuracy']
+            train_accs = metrics['train_accuracy']
+            bal_accs   = metrics['test_balanced_accuracy']
+            results[name]  = (test_accs, train_accs)
+            balanced[name] = bal_accs
+            print(f"  Test  accuracy         : {test_accs.mean():.3f} +/- {test_accs.std():.3f}")
+            print(f"  Test  balanced accuracy: {bal_accs.mean():.3f} +/- {bal_accs.std():.3f}")
+            print(f"  Train accuracy         : {train_accs.mean():.3f} +/- {train_accs.std():.3f}")
             step += 1
 
     # ── Save classifier results for reuse in extras.py ───────────────────────
     results_path = os.path.join(out_dir, f"classifier_results_{safe_name}.npz")
     np.savez(results_path,
              **{f"{name}__test":  test_accs for name, (test_accs, _) in results.items()},
-             **{f"{name}__train": train_accs for name, (_, train_accs) in results.items()})
+             **{f"{name}__train": train_accs for name, (_, train_accs) in results.items()},
+             **{f"{name}__balanced": balanced[name] for name in results})
     print(f"\n  Classifier results saved -> {results_path}")
 
     # ── 11. Plot comparison (chance line at 1/n_classes) ──────────────────────
@@ -211,6 +237,14 @@ def main():
         X, y_labels, mz, safe_name, out_dir,
         top_n=config.TOP_N_FEATURES, X_norm=X_norm,
         log_transform=_LOG_TRANSFORM,
+        X_filt_raw=X_filt_raw, groups=groups,
+        normalization=config.NORMALIZATION, scaling=_SCALING,
+        univariate_test=getattr(config, 'UNIVARIATE_TEST', 'auto'),
+        compute_stability=getattr(config, 'RUN_FEATURE_STABILITY', False),
+        n_boot=getattr(config, 'N_BOOTSTRAP', 200),
+        compute_overlap_null=getattr(config, 'RUN_OVERLAP_PERMUTATION', False),
+        n_overlap_perm=getattr(config, 'N_OVERLAP_PERMUTATIONS', 200),
+        random_state=config.RANDOM_SEED,
     )
     plot_spectrum_with_features(X_binned, mz_binned, y_labels, overlap_df,
                                 experiment_name,

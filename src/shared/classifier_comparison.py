@@ -351,14 +351,34 @@ def _encode(y_labels):
     return LabelEncoder().fit_transform(y_labels)
 
 
-def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits):
-    """Leak-free, group-aware CV. Returns (test_accs, train_accs)."""
-    steps = [(name, clone(t)) for name, t in prep_steps] + [('clf', clone(estimator))]
-    pipe  = Pipeline(steps)
-    sgkf  = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=_SEED)
-    res   = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
-                           scoring='accuracy', return_train_score=True)
-    return res['test_score'], res['train_score']
+def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits,
+                    n_repeats=1, return_metrics=False):
+    """Leak-free, group-aware CV with optional repeats and balanced accuracy.
+
+    Returns (test_accs, train_accs) by default; with return_metrics=True returns
+    a dict with pooled 'test_accuracy', 'train_accuracy', and
+    'test_balanced_accuracy' arrays. Repeats re-shuffle the splitter (seed
+    `_SEED + r`) and pool all fold scores to reduce small-design variance.
+    """
+    scoring = {'acc': 'accuracy', 'bal': 'balanced_accuracy'}
+    test_acc, train_acc, test_bal = [], [], []
+    for r in range(max(1, n_repeats)):
+        steps = [(name, clone(t)) for name, t in prep_steps] + [('clf', clone(estimator))]
+        pipe  = Pipeline(steps)
+        sgkf  = StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
+                                     random_state=_SEED + r)
+        res   = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
+                               scoring=scoring, return_train_score=True)
+        test_acc.append(res['test_acc'])
+        train_acc.append(res['train_acc'])
+        test_bal.append(res['test_bal'])
+    test_acc  = np.concatenate(test_acc)
+    train_acc = np.concatenate(train_acc)
+    test_bal  = np.concatenate(test_bal)
+    if return_metrics:
+        return {'test_accuracy': test_acc, 'train_accuracy': train_acc,
+                'test_balanced_accuracy': test_bal}
+    return test_acc, train_acc
 
 
 def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=_SEED):
@@ -373,9 +393,11 @@ def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=_SEED):
     return np.array(test_accs), np.array(train_accs)
 
 
-def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps):
+def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps,
+              n_repeats=1, return_metrics=False):
     if groups is not None and prep_steps is not None:
-        return _run_grouped_cv(estimator, X, y, groups, prep_steps, n_splits)
+        return _run_grouped_cv(estimator, X, y, groups, prep_steps, n_splits,
+                               n_repeats=n_repeats, return_metrics=return_metrics)
     warnings.warn(
         "Running LEGACY ungrouped CV on pre-preprocessed X. This reintroduces "
         "pseudoreplication and preprocessing leakage. Pass groups= and "
@@ -390,29 +412,31 @@ def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps):
 # as an alias for backward compatibility.
 
 def random_forest(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                  random_state=_SEED):
+                  random_state=_SEED, n_repeats=1, return_metrics=False):
     y   = _encode(y_labels)
     est = RandomForestClassifier(n_estimators=100, random_state=random_state)
     return _dispatch(est,
                      lambda: RandomForestClassifier(n_estimators=100,
                                                     random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 # Backward-compatible alias
 RandomForest = random_forest
 
 
 def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                 random_state=_SEED):
+                 random_state=_SEED, n_repeats=1, return_metrics=False):
     y   = _encode(y_labels)
     est = SVC(kernel='linear', random_state=random_state)
     return _dispatch(est,
                      lambda: SVC(kernel='linear', random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                      random_state=_SEED):
+                      random_state=_SEED, n_repeats=1, return_metrics=False):
     y   = _encode(y_labels)
     est = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
                                      max_depth=3, random_state=random_state)
@@ -420,33 +444,37 @@ def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None,
                      lambda: GradientBoostingClassifier(n_estimators=100,
                              learning_rate=0.1, max_depth=3,
                              random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                        random_state=_SEED):
+                        random_state=_SEED, n_repeats=1, return_metrics=False):
     y   = _encode(y_labels)
     est = LogisticRegression(max_iter=1000, random_state=random_state)
     return _dispatch(est,
                      lambda: LogisticRegression(max_iter=1000,
                                                random_state=random_state),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                 random_state=_SEED):
+                 random_state=_SEED, n_repeats=1, return_metrics=False):
     y   = _encode(y_labels)
     est = LinearDiscriminantAnalysis()
     return _dispatch(est, lambda: LinearDiscriminantAnalysis(),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                   random_state=_SEED):
+                   random_state=_SEED, n_repeats=1, return_metrics=False):
     y   = _encode(y_labels)
     est = RidgeClassifier()
     return _dispatch(est, lambda: RidgeClassifier(),
-                     X, y, n_splits, groups, prep_steps)
+                     X, y, n_splits, groups, prep_steps,
+                     n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 # -- Plotting -----------------------------------------------------------------
@@ -506,14 +534,22 @@ def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
 # -- Feature importance overlap (DESCRIPTIVE — full-data fit is correct here) --
 
 def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
-                                top_n=50, X_norm=None, log_transform='log10'):
+                                top_n=50, X_norm=None, log_transform='log10',
+                                X_filt_raw=None, groups=None,
+                                normalization='tic', scaling='autoscale',
+                                univariate_test='auto',
+                                compute_stability=False, n_boot=200,
+                                compute_overlap_null=False, n_overlap_perm=200,
+                                random_state=_SEED):
     """
     Final ensemble feature ranking. Fits RF, SVM, GB, LR, Ridge and PLS-DA VIP
     on the FULL preprocessed dataset and reports features appearing in the top
     `top_n` of >= 2 of the 6 methods.
 
     This is the reported candidate list, not a generalisation estimate, so it is
-    fit on all data by design.
+    fit on all data by design. Univariate fold-change/p/BH-q, colony-bootstrap
+    selection stability, and a label-permutation overlap null are added as extra
+    columns (see _attach_feature_statistics).
     """
     le      = LabelEncoder()
     y       = le.fit_transform(y_labels)
@@ -624,7 +660,22 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
         else:                     direction.append('mixed')
     overlap_df['ridge_direction'] = direction
 
-    overlap_df = overlap_df.sort_values('n_methods', ascending=False)
+    # -- Statistical-rigor columns (shared helper) --------------------------------
+    from src.shared.classifier_comparison_standard import _attach_feature_statistics
+    _attach_feature_statistics(
+        overlap_df, overlap_list, counts, X, X_norm, y_labels, mz,
+        top_n=top_n, log_transform=log_transform, univariate_test=univariate_test,
+        X_filt_raw=X_filt_raw, groups=groups, normalization=normalization,
+        scaling=scaling, compute_stability=compute_stability, n_boot=n_boot,
+        compute_overlap_null=compute_overlap_null, n_overlap_perm=n_overlap_perm,
+        random_state=random_state,
+    )
+
+    if 'q_value_BH' in overlap_df.columns:
+        overlap_df = overlap_df.sort_values(['q_value_BH', 'n_methods'],
+                                            ascending=[True, False])
+    else:
+        overlap_df = overlap_df.sort_values('n_methods', ascending=False)
     csv_path   = os.path.join(out_dir, f'feature_overlap_{safe_name}.csv')
     overlap_df.to_csv(csv_path, index=False, encoding='utf-8')
     print(f"  Saved -> {csv_path}")

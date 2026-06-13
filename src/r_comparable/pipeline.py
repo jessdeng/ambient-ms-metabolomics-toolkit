@@ -13,6 +13,8 @@ Usage:
 from standard.pipeline import (
     fit_plsda,
     compute_vip_1comp,
+    compute_plsda_q2,
+    evaluate_plsda_q2,
     plot_scores_3d,
     plot_vip,
 )

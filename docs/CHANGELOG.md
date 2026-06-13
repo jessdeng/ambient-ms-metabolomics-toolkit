@@ -1,5 +1,42 @@
 # Changelog
 
+## [Unreleased] — Leakage hardening, univariate FDR & selection stability
+
+### Fixed (data leakage / pseudoreplication)
+- **Permutation test (standard pipeline).** `standard/extras.py::run_permutation_test`
+  previously ran on the globally-preprocessed full-data `X` with plain
+  `StratifiedKFold`, leaking preprocessing/feature-selection and splitting a
+  colony's technical replicates across folds. It now runs the **entire**
+  preprocessing + model inside `StratifiedGroupKFold` (colony-grouped,
+  leak-free), permuting labels outside the pipeline — matching the
+  `r_comparable` path. The observed accuracy is no longer inflated.
+- **Global supervised SNR floor.** `run_analysis.py` (both pipelines) applied the
+  label-aware `filter_snr_floor` to the matrix fed into cross-validation. The
+  filter is now applied only to the descriptive copy; the CV input is the raw
+  binned matrix and the in-pipeline `SNRFloor` transformer re-fits it per fold.
+
+### Added (statistical rigor)
+- `src/shared/feature_stats.py`: univariate fold-change + test (Welch t / ANOVA;
+  Wilcoxon / Kruskal-Wallis) with **Benjamini-Hochberg FDR**; colony-bootstrap
+  **selection-frequency stability**; and a **label-permutation null** for the
+  cross-method overlap counts.
+- `feature_overlap_<experiment>.csv` now includes `fold_change`,
+  `log2_fold_change`, `p_value`, `q_value_BH`, `univariate_test`,
+  `selection_frequency`, and `overlap_null_freq`; rows are sorted by BH q-value.
+- **PLS-DA Q² + permuted-Q²** logged in both `run_analysis.py` pipelines
+  (`compute_plsda_q2` / `evaluate_plsda_q2` in `standard/pipeline.py`).
+- **Repeated grouped CV** with **balanced accuracy** reported per classifier
+  (`N_CV_REPEATS`); balanced scores saved to the results `.npz`.
+
+### Fixed (defensive / reproducibility)
+- `filter_low_variance` now zero-guards the division by the feature mean
+  (no more inf/NaN RSD corrupting the percentile threshold).
+- Permutation p-values use the `+1/+1` estimator (Phipson & Smyth 2010) in
+  **both** pipelines — they can no longer return exactly 0.
+- New config flags: `N_CV_REPEATS`, `UNIVARIATE_TEST`, `RUN_FEATURE_STABILITY`,
+  `N_BOOTSTRAP`, `RUN_OVERLAP_PERMUTATION`, `N_OVERLAP_PERMUTATIONS`,
+  `RUN_PLSDA_Q2`, `N_Q2_PERMUTATIONS`. Added `scipy` to requirements.
+
 ## [Unreleased] — Per-group attribution for ensemble features
 
 ### Added

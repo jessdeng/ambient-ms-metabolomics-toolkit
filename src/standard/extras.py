@@ -39,14 +39,15 @@ from sklearn.metrics import accuracy_score
 
 import config
 from standard.preprocessing import (
-    load_experiment, bin_features,
+    load_experiment, bin_features, filter_mass_range,
     filter_low_variance, filter_low_abundance, preprocess
 )
 from standard.pipeline import compute_vip_1comp, fit_plsda
 from shared.classifier_comparison_standard import (
     RandomForest, svm_classify, gradient_boosting,
     logistic_regression, lda_classify, ridge_classify,
-    feature_importance_analysis
+    feature_importance_analysis,
+    make_groups, make_preprocessor, auto_n_splits,
 )
 
 BASE_DIR = _ROOT
@@ -55,14 +56,30 @@ BASE_DIR = _ROOT
 # -- Shared data loading ---------------------------------------------------------
 
 def _load_and_preprocess(experiment_name):
-    """Load, filter, and preprocess one experiment. Returns X, y, mz, X_filt_raw."""
+    """Load, filter, and preprocess one experiment.
+
+    Returns
+    -------
+    X          : full-data preprocessed (scaled) descriptive matrix
+    y_labels   : class labels
+    mz         : m/z of the filtered descriptive features (aligned with X)
+    X_filt_raw : variance/abundance-filtered RAW intensities (aligned with X)
+    X_cv       : mass-range-filtered RAW binned matrix for leak-free grouped CV
+    mz_cv      : m/z aligned with X_cv
+    sample_names : filename per sample (for colony grouping)
+    """
     experiment_dir = os.path.join(BASE_DIR, 'data', experiment_name)
     assert os.path.isdir(experiment_dir), (
         f"Experiment folder not found: {experiment_dir!r}"
     )
 
-    X_raw, y_labels, _, mz = load_experiment(experiment_dir)
+    X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir)
     X_binned, mz = bin_features(X_raw, mz, bin_width=config.BIN_WIDTH)
+    X_binned, mz = filter_mass_range(X_binned, mz,
+                                     mz_min=config.MZ_MIN, mz_max=config.MZ_MAX)
+
+    # RAW matrix fed to the grouped CV (preprocessing re-fit per fold).
+    X_cv, mz_cv = X_binned.copy(), mz.copy()
 
     if config.VARIANCE_PERCENTILE > 0:
         X_filt, mz = filter_low_variance(X_binned, mz, percentile=config.VARIANCE_PERCENTILE)
@@ -79,7 +96,7 @@ def _load_and_preprocess(experiment_name):
         log_transform=config.LOG_TRANSFORM,
         scaling=config.SCALING
     )
-    return X, y_labels, mz, X_filt_raw
+    return X, y_labels, mz, X_filt_raw, X_cv, mz_cv, sample_names
 
 
 # -- 1. Summary Report -----------------------------------------------------------
@@ -404,66 +421,88 @@ def run_vip_filtered_classifiers(X, y_labels, mz, safe_name, out_dir, vip_thresh
 
 # -- 7. Permutation Testing ------------------------------------------------------
 
-def run_permutation_test(X, y_labels, safe_name, out_dir,
-                         n_permutations=100, random_state=42):
+def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
+                         n_permutations=100, random_state=None):
     """
     Validates that classification is significantly above chance by shuffling
-    class labels n_permutations times and comparing to real accuracy.
+    class labels n_permutations times and comparing to the observed accuracy.
 
-    A p-value < 0.05 means the model is learning real signal, not memorising
-    noise. This is the most rigorous check for small MS datasets.
+    CORRECTED (was leaked + pseudoreplicated): this now runs the WHOLE
+    preprocessing + modelling pipeline inside StratifiedGroupKFold keyed on the
+    biological colony, exactly like the reported classifier path. The matrix
+    passed in is the RAW mass-range-filtered binned matrix (`X_cv`) — NOT the
+    globally preprocessed `X` — so normalisation/transform/scaling/feature
+    selection are re-fit on each training fold and never see the held-out fold.
+    Technical replicates of a colony are kept together, so the observed accuracy
+    is not inflated by replicate memorisation. The label shuffle happens OUTSIDE
+    the pipeline, regenerating an honest null for the full procedure.
 
-    Uses Random Forest as the reference classifier (typically best performer).
-    Results are saved as a plot and printed to console.
+    Uses Random Forest as the reference classifier.
     """
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.preprocessing import LabelEncoder
-    from sklearn.model_selection import StratifiedKFold
-    from sklearn.metrics import accuracy_score
+    import warnings
+    if random_state is None:
+        random_state = config.RANDOM_SEED
 
-    le = LabelEncoder()
-    y = le.fit_transform(y_labels)
-    cv = StratifiedKFold(n_splits=config.CV_FOLDS, shuffle=True,
-                         random_state=random_state)
+    os.makedirs(out_dir, exist_ok=True)
 
-    def _cv_score(y_use):
-        accs = []
-        for train_idx, test_idx in cv.split(X, y_use):
-            clf = RandomForestClassifier(n_estimators=100, random_state=random_state)
-            clf.fit(X[train_idx], y_use[train_idx])
-            accs.append(accuracy_score(y_use[test_idx], clf.predict(X[test_idx])))
-        return np.mean(accs)
+    groups     = make_groups(y_labels, sample_names)
+    prep_steps = make_preprocessor(
+        normalization=config.NORMALIZATION, log_transform=config.LOG_TRANSFORM,
+        scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
+        abundance_percentile=config.ABUNDANCE_PERCENTILE,
+        prevalence_threshold=config.PREVALENCE_THRESHOLD,
+        snr_floor_enabled=config.SNR_FLOOR_ENABLED,
+        snr_threshold=config.SNR_THRESHOLD,
+        noise_quantile=config.NOISE_QUANTILE,
+        min_fraction_in_group=config.MIN_FRACTION_IN_GROUP,
+    )
+    n_splits  = auto_n_splits(y_labels, groups, desired=config.CV_FOLDS)
+    n_repeats = getattr(config, 'N_CV_REPEATS', 1)
 
-    # Real accuracy
-    real_score = _cv_score(y)
-    print(f"  Real accuracy (Random Forest, {config.CV_FOLDS}-fold CV): {real_score:.3f}")
+    obs_test, _ = RandomForest(X_binned, y_labels, n_splits=n_splits,
+                               groups=groups, prep_steps=prep_steps,
+                               n_repeats=n_repeats, random_state=random_state)
+    real_score = float(obs_test.mean())
+    print(f"  Observed accuracy (Random Forest, grouped CV): {real_score:.3f}")
+    print(f"  Running {n_permutations} permutations (grouped, in-pipeline) ...")
 
-    # Permuted accuracies
     rng = np.random.default_rng(random_state)
     perm_scores = []
     for i in range(n_permutations):
-        y_perm = rng.permutation(y)
-        perm_scores.append(_cv_score(y_perm))
+        y_perm = rng.permutation(y_labels)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                perm_test, _ = RandomForest(X_binned, y_perm, n_splits=n_splits,
+                                            groups=groups, prep_steps=prep_steps,
+                                            n_repeats=n_repeats,
+                                            random_state=random_state + i + 1)
+            perm_scores.append(float(perm_test.mean()))
+        except Exception:
+            perm_scores.append(np.nan)
         if (i + 1) % 25 == 0:
             print(f"    Permutation {i + 1}/{n_permutations}...")
 
     perm_scores = np.array(perm_scores)
-    pvalue = (np.sum(perm_scores >= real_score) + 1) / (n_permutations + 1)
+    valid = ~np.isnan(perm_scores)
+    # +1/+1 (Phipson & Smyth 2010): a permutation p-value must never be 0.
+    pvalue = ((perm_scores[valid] >= real_score).sum() + 1) / (valid.sum() + 1)
 
-    print(f"  Permutation mean accuracy: {perm_scores.mean():.3f} +/- {perm_scores.std():.3f}")
+    print(f"  Permutation mean accuracy: {perm_scores[valid].mean():.3f} +/- "
+          f"{perm_scores[valid].std():.3f}")
     print(f"  p-value: {pvalue:.4f} {'significant' if pvalue < 0.05 else 'not significant'}")
 
     # Plot
     fig, ax = plt.subplots(figsize=(8, 4), dpi=300)
-    ax.hist(perm_scores, bins=20, color=sns.color_palette('colorblind')[0],
-            alpha=0.7, label=f'Permuted ({n_permutations} runs)')
+    ax.hist(perm_scores[valid], bins=20, color=sns.color_palette('colorblind')[0],
+            alpha=0.7, label=f'Permuted ({int(valid.sum())} runs)')
     ax.axvline(real_score, color='red', linewidth=2,
-               label=f'Real accuracy = {real_score:.3f}')
-    ax.axvline(perm_scores.mean(), color='grey', linewidth=1,
-               linestyle='--', label=f'Permutation mean = {perm_scores.mean():.3f}')
-    ax.set_xlabel('Cross-validated Accuracy')
+               label=f'Observed accuracy = {real_score:.3f}')
+    ax.axvline(perm_scores[valid].mean(), color='grey', linewidth=1,
+               linestyle='--', label=f'Permutation mean = {perm_scores[valid].mean():.3f}')
+    ax.set_xlabel('Grouped-CV Accuracy')
     ax.set_ylabel('Count')
-    ax.set_title(f'Permutation Test -- {config.EXPERIMENT}\np = {pvalue:.4f}')
+    ax.set_title(f'Permutation Test (grouped, leak-free) -- {config.EXPERIMENT}\np = {pvalue:.4f}')
     ax.legend(fontsize=9)
     plt.tight_layout()
 
@@ -484,8 +523,23 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"\nLoading data for: {experiment_name!r}")
-    X, y_labels, mz, X_filt_raw = _load_and_preprocess(experiment_name)
+    X, y_labels, mz, X_filt_raw, X_cv, mz_cv, sample_names = \
+        _load_and_preprocess(experiment_name)
     print(f"  {X.shape[0]} samples, {X.shape[1]} features")
+
+    # Grouping + leak-free preprocessor reused by the fallback CV below.
+    groups     = make_groups(y_labels, sample_names)
+    prep_steps = make_preprocessor(
+        normalization=config.NORMALIZATION, log_transform=config.LOG_TRANSFORM,
+        scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
+        abundance_percentile=config.ABUNDANCE_PERCENTILE,
+        prevalence_threshold=config.PREVALENCE_THRESHOLD,
+        snr_floor_enabled=config.SNR_FLOOR_ENABLED,
+        snr_threshold=config.SNR_THRESHOLD, noise_quantile=config.NOISE_QUANTILE,
+        min_fraction_in_group=config.MIN_FRACTION_IN_GROUP,
+    )
+    n_splits  = auto_n_splits(y_labels, groups, desired=config.CV_FOLDS)
+    n_repeats = getattr(config, 'N_CV_REPEATS', 1)
 
     # -- Load or compute classifier results --------------------------------------
     classifier_results = {}
@@ -494,12 +548,13 @@ def main():
         if os.path.exists(results_path):
             print(f"\n[Extras] Loading saved classifier results from {results_path}")
             saved = np.load(results_path)
-            names = set(k.replace('__test', '').replace('__train', '') for k in saved.files)
+            names = set(k.replace('__test', '').replace('__train', '').replace('__balanced', '')
+                        for k in saved.files)
             for name in names:
                 classifier_results[name] = (saved[f"{name}__test"], saved[f"{name}__train"])
         else:
             print(f"\n[Extras] No saved classifier results found ({results_path})")
-            print("  Running classifiers now -- run run_analysis.py first to avoid this.")
+            print("  Running classifiers now (grouped, leak-free) -- run run_analysis.py first to avoid this.")
             classifier_fns = {
                 'Random Forest':       (config.USE_RANDOM_FOREST,       RandomForest),
                 'SVM':                 (config.USE_SVM,                 svm_classify),
@@ -511,7 +566,9 @@ def main():
             for name, (enabled, fn) in classifier_fns.items():
                 if enabled:
                     print(f"  {name}...")
-                    classifier_results[name] = fn(X, y_labels, n_splits=config.CV_FOLDS)
+                    classifier_results[name] = fn(
+                        X_cv, y_labels, n_splits=n_splits, groups=groups,
+                        prep_steps=prep_steps, n_repeats=n_repeats)
 
     if config.RUN_SUMMARY_REPORT:
         print("\n[Extras] Summary Report")
@@ -543,9 +600,10 @@ def main():
         )
 
     if config.RUN_PERMUTATION_TEST:
-        print(f"\n[Extras] Permutation Test ({config.N_PERMUTATIONS} permutations)")
+        print(f"\n[Extras] Permutation Test ({config.N_PERMUTATIONS} permutations, "
+              f"grouped + in-pipeline)")
         run_permutation_test(
-            X, y_labels, safe_name, out_dir,
+            X_cv, y_labels, sample_names, safe_name, out_dir,
             n_permutations=config.N_PERMUTATIONS
         )
 
