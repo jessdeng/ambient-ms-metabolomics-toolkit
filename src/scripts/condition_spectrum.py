@@ -28,6 +28,7 @@ import config
 # ── Configuration ─────────────────────────────────────────────────────────────
 PIPELINE      = 'standard'    # 'standard' or 'r_comparable'
 MIN_N_METHODS = config.HIGH_CONFIDENCE_N_METHODS   # set in config.py
+INTERACTIVE   = True         # True → Plotly HTML (notebook); False → Matplotlib PNG
 # ──────────────────────────────────────────────────────────────────────────────
 
 BASE_DIR   = _ROOT
@@ -82,12 +83,14 @@ def main():
 
     from shared.visualization import plot_spectrum_with_features
 
-    out_path = os.path.join(OUTPUT_DIR, f'condition_spectrum_{safe_name}.png')
+    ext      = 'html' if INTERACTIVE else 'png'
+    out_path = os.path.join(OUTPUT_DIR, f'condition_spectrum_{safe_name}.{ext}')
     plot_spectrum_with_features(
         X_binned, mz, y_labels, overlap_df,
         experiment_name=f'{experiment} ({PIPELINE})',
         out_path=out_path,
         min_n_methods=MIN_N_METHODS,
+        interactive=INTERACTIVE,
     )
     print(f"Saved -> {out_path}")
 
