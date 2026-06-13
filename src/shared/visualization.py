@@ -13,53 +13,6 @@ apply_style()
 
 
 # ---------------------------------------------------------------------------
-# Provenance inspection helper
-# ---------------------------------------------------------------------------
-
-def _inspect_array(name, arr, context=""):
-    """Print a diagnostic summary of an array immediately before it is plotted."""
-    tag = f"[PROVENANCE] {name}"
-    if context:
-        tag += f" ({context})"
-
-    flat = arr.ravel()
-    n_total  = flat.size
-    n_finite = int(np.isfinite(flat).sum())
-    n_zeros  = int((flat == 0).sum())
-    n_neg    = int((flat < 0).sum())
-    val_min  = float(np.nanmin(flat))
-    val_max  = float(np.nanmax(flat))
-    val_mean = float(np.nanmean(flat))
-    val_std  = float(np.nanstd(flat))
-
-    looks_log_transformed = (val_min < 0) or (val_max < 50 and val_min >= -20)
-    looks_mean_centred    = abs(val_mean) < 0.05 * (abs(val_max) + 1e-9)
-    looks_unit_variance   = abs(val_std - 1.0) < 0.15
-
-    unique_small = flat[(flat > 0) & (flat < 1.0)]
-    halfmin_warning = False
-    if len(unique_small) > 0:
-        mode_candidate  = float(np.median(unique_small))
-        n_at_mode       = int(np.sum(np.abs(flat - mode_candidate) < 1e-12))
-        halfmin_warning = (n_at_mode / max(n_total, 1)) > 0.05
-
-    print(f"\n{'='*60}")
-    print(f"{tag}")
-    print(f"  shape         : {arr.shape}  (dtype={arr.dtype})")
-    print(f"  finite values : {n_finite}/{n_total}")
-    print(f"  zeros         : {n_zeros} ({100*n_zeros/max(n_total,1):.1f}%)")
-    print(f"  negative vals : {n_neg} ({100*n_neg/max(n_total,1):.1f}%)")
-    print(f"  min / max     : {val_min:.6g} / {val_max:.6g}")
-    print(f"  mean / std    : {val_mean:.6g} / {val_std:.6g}")
-    print(f"  log-transformed?  {'YES' if looks_log_transformed else 'no'}")
-    print(f"  mean-centred?     {'YES' if looks_mean_centred else 'no'}")
-    print(f"  unit-variance?    {'YES' if looks_unit_variance else 'no'}")
-    if halfmin_warning:
-        print(f"  half-min imputed? YES — many values near {mode_candidate:.4g}")
-    print(f"{'='*60}\n")
-
-
-# ---------------------------------------------------------------------------
 # Publication-quality dual-panel spectrum plot
 # ---------------------------------------------------------------------------
 
@@ -94,10 +47,6 @@ def plot_spectrum_with_features(
     · 300 DPI, Arial/DejaVu Sans, Nature/Science minimalist style.
     """
 
-    # ── Provenance check ────────────────────────────────────────────────────
-    _inspect_array("X_binned (as received)", X_binned,
-                   context="raw_data — should NOT be log-transformed or scaled")
-
     # ── Feature tiers ────────────────────────────────────────────────────────
     if 'n_methods' in overlap_df.columns:
         feat_df   = overlap_df[overlap_df['n_methods'] >= min_n_methods].copy()
@@ -108,11 +57,6 @@ def plot_spectrum_with_features(
     else:
         feat_all  = overlap_df['mz'].values
         feat_high = feat_all
-
-    # mz alignment check
-    gap = np.array([np.abs(mz - m).min() for m in feat_high]) if feat_high.size else np.array([0.0])
-    print(f"[PROVENANCE] mz alignment — max gap = {gap.max():.6f} Da  "
-          f"({'OK' if gap.max() < 0.001 else 'WARNING'})")
 
     # ── Global layout settings ───────────────────────────────────────────────
     sns.set_style('ticks')
