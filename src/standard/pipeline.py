@@ -22,6 +22,10 @@ import matplotlib.gridspec as gridspec
 import seaborn as sns
 import plotly.graph_objects as go
 
+from src.shared.plot_style import apply_style, pub_savefig
+
+apply_style()
+
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 from sklearn.model_selection import StratifiedKFold
@@ -149,7 +153,7 @@ def plot_vip(vip, mz, X, y_labels, n_top, experiment_name, out_path):
     row_range[row_range == 0] = 1
     heatmap_norm = (heatmap_data - row_mins) / row_range
 
-    fig = plt.figure(figsize=(12, 8))
+    fig = plt.figure(figsize=(12, 8), dpi=300)
     gs = gridspec.GridSpec(1, 2, width_ratios=[2, 1.2], wspace=0.05)
 
     x_min = top_vip.min() * 0.95
@@ -187,6 +191,4 @@ def plot_vip(vip, mz, X, y_labels, n_top, experiment_name, out_path):
     cbar.set_ticklabels(['Low', 'High'])
 
     fig.suptitle(f'Top {n_top} VIP Features -- {experiment_name}', fontsize=13)
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved -> {out_path}")
+    pub_savefig(out_path)

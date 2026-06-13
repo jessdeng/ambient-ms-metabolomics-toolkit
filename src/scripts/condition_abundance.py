@@ -22,6 +22,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 # Add repo root to path
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,10 @@ _ROOT = os.path.dirname(_SRC)
 sys.path.insert(0, _ROOT)  # config.py lives here
 sys.path.insert(0, _SRC)   # src/ packages take priority
 import config
+
+from src.shared.plot_style import apply_style, pub_savefig
+
+apply_style()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 PIPELINE      = 'standard'    # 'standard' or 'r_comparable'
@@ -86,7 +91,8 @@ def main():
     n_feat = len(candidates)
     fig, axes = plt.subplots(
         1, 2,
-        figsize=(max(12, len(groups) * 2.5), max(3, n_feat * 0.8 + 2))
+        figsize=(max(12, len(groups) * 2.5), max(3, n_feat * 0.8 + 2)),
+        dpi=300,
     )
 
     ylabels = [f"m/z {row['mz']:.2f}  (n={int(row['n_methods'])}, "
@@ -147,9 +153,7 @@ def main():
     plt.tight_layout()
     plot_path = os.path.join(OUTPUT_DIR, f'condition_abundance_{safe_name}.png')
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    plt.savefig(plot_path, dpi=180, bbox_inches='tight', facecolor='white')
-    plt.close()
-    print(f"\nSaved plot -> {plot_path}")
+    pub_savefig(plot_path)
 
 
 if __name__ == '__main__':

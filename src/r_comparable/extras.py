@@ -27,6 +27,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from src.shared.plot_style import apply_style, pub_savefig
+
+apply_style()
+
 from sklearn.preprocessing import LabelEncoder
 
 import config
@@ -155,7 +159,7 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     print(f"  p-value           : {p_value:.4f}  "
           f"({'significant' if p_value < 0.05 else 'NOT significant'} at a=0.05)")
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=(7, 4), dpi=300)
     ax.hist(perm_accs[valid], bins=20, color='steelblue', alpha=0.7,
             edgecolor='white', label='Permuted accuracy')
     ax.axvline(obs_acc, color='crimson', linewidth=2,
@@ -167,9 +171,7 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     plt.tight_layout()
 
     out_path = os.path.join(out_dir, f'permutation_test_{safe_name}.png')
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved -> {out_path}")
+    pub_savefig(out_path)
 
     np.save(os.path.join(out_dir, f'permutation_null_{safe_name}.npy'), perm_accs)
     return obs_acc, perm_accs, p_value

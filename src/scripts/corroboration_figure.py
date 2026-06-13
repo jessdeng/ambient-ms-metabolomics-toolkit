@@ -35,6 +35,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
+from src.shared.plot_style import apply_style, pub_savefig
+
+apply_style()
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC  = os.path.dirname(_HERE)
 _ROOT = os.path.dirname(_SRC)
@@ -205,7 +209,7 @@ def main():
     palette_rgb = sns.color_palette('colorblind', n_colors=len(groups))
     group_palette = {g: palette_rgb[i] for i, g in enumerate(groups)}
 
-    fig = plt.figure(figsize=(12, 12))
+    fig = plt.figure(figsize=(12, 12), dpi=300)
     gs  = fig.add_gridspec(2, 1, height_ratios=[1, 1.4], hspace=0.18)
 
     _draw_upset(fig, gs[0], df)
@@ -215,9 +219,7 @@ def main():
                  fontsize=13, y=0.998)
 
     out_path = os.path.join(OUTPUT_DIR, f'corroboration_{safe_name}.png')
-    plt.savefig(out_path, dpi=200, bbox_inches='tight', facecolor='white')
-    plt.close()
-    print(f"Saved -> {out_path}")
+    pub_savefig(out_path)
 
 
 if __name__ == '__main__':

@@ -30,6 +30,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from collections import Counter
+from src.shared.plot_style import apply_style, pub_savefig
+
+apply_style()
 
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.pipeline import Pipeline
@@ -458,8 +461,9 @@ def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
     palette = sns.color_palette('colorblind', n_colors=n)
 
     fig, (ax_top, ax_bot) = plt.subplots(
-        2, 1, figsize=(max(10, n * 1.4), 10),
-        gridspec_kw={'height_ratios': [2, 1]}
+        2, 1, figsize=(max(10, n * 1.4), 9),
+        gridspec_kw={'height_ratios': [2, 1]},
+        dpi=300,
     )
 
     for i, (name, (test_accs, train_accs)) in enumerate(results.items()):
@@ -496,9 +500,7 @@ def plot_accuracy_comparison(results, experiment_name, out_path, chance=None):
     ax_bot.legend(fontsize=8)
 
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved -> {out_path}")
+    pub_savefig(out_path)
 
 
 # -- Feature importance overlap (DESCRIPTIVE — full-data fit is correct here) --

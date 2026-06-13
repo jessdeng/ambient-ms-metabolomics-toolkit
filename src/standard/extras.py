@@ -26,6 +26,9 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import seaborn as sns
 from collections import Counter
+from src.shared.plot_style import apply_style, pub_savefig
+
+apply_style()
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression, RidgeClassifier
@@ -181,7 +184,7 @@ def run_variation_plot(X, y_labels, safe_name, out_dir):
             records.append({'group': label, 'intensity': val})
     df = pd.DataFrame(records)
 
-    fig, ax = plt.subplots(figsize=(max(8, len(groups) * 2), 5))
+    fig, ax = plt.subplots(figsize=(max(8, len(groups) * 2), 5), dpi=300)
     sns.boxplot(data=df, x='group', y='intensity', palette=palette, ax=ax)
     ax.set_xlabel('Group')
     ax.set_ylabel('Preprocessed Intensity')
@@ -190,9 +193,7 @@ def run_variation_plot(X, y_labels, safe_name, out_dir):
     plt.tight_layout()
 
     out_path = os.path.join(out_dir, f"variation_plot_{safe_name}.png")
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved -> {out_path}")
+    pub_savefig(out_path)
 
 
 # -- 3. Feature Correlation Heatmap ----------------------------------------------
@@ -211,7 +212,7 @@ def run_correlation_heatmap(X, y_labels, mz, safe_name, out_dir):
     corr = np.corrcoef(X_top.T)
     labels = [f"{v:.1f}" for v in top_mz]
 
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(10, 8), dpi=300)
     sns.heatmap(
         corr,
         xticklabels=labels,
@@ -230,9 +231,7 @@ def run_correlation_heatmap(X, y_labels, mz, safe_name, out_dir):
     plt.tight_layout()
 
     out_path = os.path.join(out_dir, f"correlation_heatmap_{safe_name}.png")
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved -> {out_path}")
+    pub_savefig(out_path)
 
 
 # -- 4. Cross-Experiment Comparison ----------------------------------------------
@@ -279,7 +278,7 @@ def run_cross_experiment_comparison(out_dir):
         print(f"  Saved -> {out_path}")
 
         # Plot shared features
-        fig, ax = plt.subplots(figsize=(10, 4))
+        fig, ax = plt.subplots(figsize=(10, 4), dpi=300)
         ax.vlines(shared_df['mz'], 0, 1, color=sns.color_palette('colorblind')[0], alpha=0.7, linewidth=1)
         ax.set_xlabel('m/z (Da)')
         ax.set_yticks([])
@@ -455,7 +454,7 @@ def run_permutation_test(X, y_labels, safe_name, out_dir,
     print(f"  p-value: {pvalue:.4f} {'significant' if pvalue < 0.05 else 'not significant'}")
 
     # Plot
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=300)
     ax.hist(perm_scores, bins=20, color=sns.color_palette('colorblind')[0],
             alpha=0.7, label=f'Permuted ({n_permutations} runs)')
     ax.axvline(real_score, color='red', linewidth=2,
@@ -469,9 +468,7 @@ def run_permutation_test(X, y_labels, safe_name, out_dir,
     plt.tight_layout()
 
     out_path = os.path.join(out_dir, f"permutation_test_{safe_name}.png")
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved -> {out_path}")
+    pub_savefig(out_path)
 
     return real_score, perm_scores, pvalue
 

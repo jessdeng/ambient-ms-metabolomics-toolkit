@@ -26,6 +26,10 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
 
+from src.shared.plot_style import apply_style, pub_savefig
+
+apply_style()
+
 # Add repo root to path
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC  = os.path.dirname(_HERE)
@@ -64,7 +68,7 @@ def main():
     nrows = (n + 1) // 2
 
     palette = sns.color_palette('colorblind', n_colors=n)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(11, 4.5 * nrows))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(11, 4.5 * nrows), dpi=300)
     axes = axes.flatten() if n > 1 else [axes]
 
     for ax, (name, fpath), color in zip(axes, experiments.items(), palette):
@@ -135,9 +139,7 @@ def main():
 
     plt.tight_layout()
     out_path = os.path.join(OUTPUT_DIR, 'vip_vs_nmethods.png')
-    plt.savefig(out_path, dpi=200, bbox_inches='tight', facecolor='white')
-    plt.close()
-    print(f"Saved to {out_path}")
+    pub_savefig(out_path)
 
 
 if __name__ == '__main__':
