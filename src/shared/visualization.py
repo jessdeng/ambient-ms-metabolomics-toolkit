@@ -190,14 +190,14 @@ def plot_spectrum_with_features(
         ax_lin.set_xlim(mz.min(), mz.max())
 
         # Rug ticks at top of panel:  all features (thin) → high-conf (bold)
-        rug_y0_thin  = y_top * 0.93
-        rug_y0_bold  = y_top * 0.90
+        rug_y0_thin  = y_top * 0.90
+        rug_y0_bold  = y_top * 0.84
         for mz_val in feat_all:
             ax_lin.plot([mz_val, mz_val], [rug_y0_thin, y_top],
-                        color=color, lw=0.5, alpha=0.45, solid_capstyle='butt', zorder=3)
+                        color=color, lw=0.9, alpha=0.60, solid_capstyle='butt', zorder=3)
         for mz_val in feat_high:
             ax_lin.plot([mz_val, mz_val], [rug_y0_bold, y_top],
-                        color=color, lw=1.4, alpha=0.90, solid_capstyle='butt', zorder=4)
+                        color=color, lw=2.0, alpha=0.95, solid_capstyle='butt', zorder=4)
 
         ax_lin.set_ylabel('Intensity', fontsize=10, labelpad=4)
         ax_lin.set_title(group, fontsize=11, fontweight='bold', loc='left', pad=5)
@@ -218,20 +218,22 @@ def plot_spectrum_with_features(
         ax_log.set_yscale('log')
         ax_log.set_xlim(mz.min(), mz.max())
 
-        # Feature markers ON the log-scale trace
-        # All features → '|' tick at their bin intensity
+        # Feature markers on log panel.
+        # Strategy: semi-transparent coloured axvline so the feature position is
+        # unambiguous regardless of peak height, plus a ▼ triangle marker at the
+        # peak value for high-confidence features.  This gives contrast against
+        # the grey spectrum trace that dot-on-trace cannot achieve.
         for mz_val in feat_all:
-            idx    = int(np.argmin(np.abs(mz - mz_val)))
-            peak_y = max(float(avg_clipped[idx]), log_floor)
-            ax_log.plot(mz[idx], peak_y, '|',
-                        ms=7, mew=0.9, color=color, alpha=0.40, zorder=3)
-        # High-confidence → filled circle with white edge
+            ax_log.axvline(x=mz_val, color=color, lw=0.8, alpha=0.35, zorder=2)
         for mz_val in feat_high:
             idx    = int(np.argmin(np.abs(mz - mz_val)))
             peak_y = max(float(avg_clipped[idx]), log_floor)
-            ax_log.plot(mz[idx], peak_y, 'o',
-                        ms=4.5, color=color, alpha=0.92, zorder=5,
-                        markeredgecolor='white', markeredgewidth=0.6)
+            # Bold coloured line
+            ax_log.axvline(x=mz_val, color=color, lw=1.6, alpha=0.80, zorder=3)
+            # Inverted triangle just above the peak — standard mass-spec convention
+            ax_log.plot(mz[idx], peak_y * 1.4,
+                        'v', ms=5.5, color=color, alpha=0.95, zorder=5,
+                        markeredgecolor='white', markeredgewidth=0.5)
 
         ax_log.set_ylabel('Intensity (log₁₀)', fontsize=10, labelpad=4)
         ax_log.yaxis.set_major_formatter(ticker.FuncFormatter(_log_tick))
@@ -250,12 +252,11 @@ def plot_spectrum_with_features(
     legend_handles = [
         Line2D([0], [0], color='#222222', lw=0.9,
                label='Mean spectrum (raw counts)'),
-        Line2D([0], [0], color='#444444', lw=0, marker='|', ms=9,
-               markeredgewidth=1.0, alpha=0.45,
-               label=f'Ensemble features (n ≥ {min_n_methods})'),
-        Line2D([0], [0], color='#444444', lw=0, marker='o', ms=5,
-               markeredgecolor='white', markeredgewidth=0.6,
-               label=f'High-confidence features'),
+        Line2D([0], [0], color='#555555', lw=1.0, alpha=0.40,
+               label=f'Ensemble feature position (semi-transparent line)'),
+        Line2D([0], [0], color='#333333', lw=1.6, alpha=0.80,
+               marker='v', ms=6, markeredgecolor='white', markeredgewidth=0.5,
+               label='High-confidence feature (bold line + ▼ marker at peak)'),
         matplotlib.patches.Patch(
             facecolor='#aaaaaa', alpha=0.35, linewidth=0,
             label='±1 SD across samples'),
