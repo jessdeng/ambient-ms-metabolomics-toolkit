@@ -367,8 +367,15 @@ def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits,
         pipe  = Pipeline(steps)
         sgkf  = StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
                                      random_state=_SEED + r)
-        res   = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
-                               scoring=scoring, return_train_score=True)
+        with warnings.catch_warnings():
+            # Small grouped folds in many-class designs can leave a class out of
+            # a test fold; balanced_accuracy then warns "y_pred contains classes
+            # not in y_true". The metric is still computed correctly, so the
+            # cosmetic warning is suppressed here.
+            warnings.filterwarnings(
+                'ignore', message='.*y_pred contains classes not in y_true.*')
+            res = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
+                                 scoring=scoring, return_train_score=True)
         test_acc.append(res['test_acc'])
         train_acc.append(res['train_acc'])
         test_bal.append(res['test_bal'])
@@ -576,9 +583,21 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
 
     vip_imp = compute_vip_1comp(X, y_labels)
 
-    tops = [set(np.argsort(imp)[::-1][:top_n])
-            for imp in [rf_imp, svm_imp, gb_imp, lr_imp, ridge_imp, vip_imp]]
-    counts = Counter(idx for top in tops for idx in top)
+    # Consensus uses only the ENABLED methods (USE_* flags), so n_methods and the
+    # observed overlap share a denominator with the permutation null. All six
+    # importance columns are still written below for reference.
+    from src.shared.feature_stats import enabled_methods_from_config
+    try:
+        import config as _cfg_fi
+    except Exception:
+        _cfg_fi = None
+    _enabled = enabled_methods_from_config(_cfg_fi)
+    _imp_by_method = {'rf': rf_imp, 'svm': svm_imp, 'gb': gb_imp,
+                      'lr': lr_imp, 'ridge': ridge_imp, 'vip': vip_imp}
+    _tops_by_method = {m: set(np.argsort(im)[::-1][:top_n])
+                       for m, im in _imp_by_method.items()}
+    tops = [_tops_by_method[m] for m in ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']]
+    counts = Counter(idx for m in _enabled for idx in _tops_by_method[m])
 
     overlap_2plus = {idx for idx, c in counts.items() if c >= 2}
     overlap_3plus = {idx for idx, c in counts.items() if c >= 3}

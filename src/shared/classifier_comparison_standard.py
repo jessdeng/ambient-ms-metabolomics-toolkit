@@ -387,8 +387,15 @@ def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits,
         pipe = Pipeline(steps)
         sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
                                     random_state=_SEED + r)
-        res = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
-                             scoring=scoring, return_train_score=True)
+        with warnings.catch_warnings():
+            # Small grouped folds in many-class designs can leave a class out of
+            # a test fold; balanced_accuracy then warns "y_pred contains classes
+            # not in y_true". The metric is still computed correctly, so the
+            # cosmetic warning is suppressed here.
+            warnings.filterwarnings(
+                'ignore', message='.*y_pred contains classes not in y_true.*')
+            res = cross_validate(pipe, X_binned, y, groups=groups, cv=sgkf,
+                                 scoring=scoring, return_train_score=True)
         test_acc.append(res['test_acc'])
         train_acc.append(res['train_acc'])
         test_bal.append(res['test_bal'])
@@ -593,9 +600,21 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
 
     vip_imp = compute_vip_1comp(X, y_labels)
 
-    tops = [set(np.argsort(imp)[::-1][:top_n])
-            for imp in [rf_imp, svm_imp, gb_imp, lr_imp, ridge_imp, vip_imp]]
-    counts = Counter(idx for top in tops for idx in top)
+    # Consensus uses only the ENABLED methods (USE_* flags), so n_methods and the
+    # observed overlap share a denominator with the permutation null. All six
+    # importance columns are still written below for reference.
+    from src.shared.feature_stats import enabled_methods_from_config
+    try:
+        import config as _cfg_fi
+    except Exception:
+        _cfg_fi = None
+    _enabled = enabled_methods_from_config(_cfg_fi)
+    _imp_by_method = {'rf': rf_imp, 'svm': svm_imp, 'gb': gb_imp,
+                      'lr': lr_imp, 'ridge': ridge_imp, 'vip': vip_imp}
+    _tops_by_method = {m: set(np.argsort(im)[::-1][:top_n])
+                       for m, im in _imp_by_method.items()}
+    tops = [_tops_by_method[m] for m in ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']]
+    counts = Counter(idx for m in _enabled for idx in _tops_by_method[m])
 
     overlap_2plus = {idx for idx, c in counts.items() if c >= 2}
     overlap_3plus = {idx for idx, c in counts.items() if c >= 3}
@@ -709,11 +728,25 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
     candidate dataframe in place. Shared by both classifier_comparison modules."""
     from src.shared.feature_stats import (
         univariate_feature_stats, bootstrap_selection_frequency,
-        overlap_permutation_null, empirical_p,
+        overlap_permutation_null, empirical_p, enabled_methods_from_config,
     )
     from standard.preprocessing import preprocess as _preprocess
 
     overlap_list = list(overlap_list)
+
+    # Which ensemble methods are enabled (honour the global USE_* config flags).
+    # Built via the shared helper so this set is IDENTICAL to the one used for
+    # the observed consensus in feature_importance_analysis -> valid null.
+    try:
+        import config as _cfg
+    except Exception:
+        _cfg = None
+    use_methods = enabled_methods_from_config(_cfg)
+    n_jobs = int(getattr(_cfg, 'N_JOBS', -1)) if _cfg is not None else -1
+    n_methods_enabled = len(use_methods)
+    if n_methods_enabled < 6:
+        print(f"  [stats] ensemble restricted to {sorted(use_methods)} "
+              f"({n_methods_enabled} methods) via USE_* flags")
 
     # 1. Univariate fold-change + test + BH-FDR (over ALL features, then subset).
     if X_norm is not None:
@@ -733,14 +766,14 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
     else:
         print("  [stats] X_norm not provided -- skipping univariate FDR columns")
 
-    # 2. Colony-bootstrap selection-frequency stability.
+    # 2. Colony-bootstrap selection-frequency stability (parallel).
     if compute_stability and X_filt_raw is not None and groups is not None:
-        print(f"  Bootstrap stability ({n_boot} colony resamples) ...")
+        print(f"  Bootstrap stability ({n_boot} colony resamples, n_jobs={n_jobs}) ...")
         freq, n_used = bootstrap_selection_frequency(
             X_filt_raw, y_labels, groups, _preprocess, compute_vip_1comp,
             normalization=normalization, log_transform=log_transform,
             scaling=scaling, top_n=top_n, min_methods=2, n_boot=n_boot,
-            seed=random_state,
+            seed=random_state, use_methods=use_methods, n_jobs=n_jobs,
         )
         overlap_df['selection_frequency'] = freq[overlap_list]
         n_stable = int((freq[overlap_list] >= 0.8).sum())
@@ -749,16 +782,23 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
     elif compute_stability:
         print("  [stats] stability requested but X_filt_raw/groups missing -- skipped")
 
-    # 3. Label-permutation null for the cross-method overlap counts.
+    # 3. Label-permutation null for the cross-method overlap counts (parallel).
     if compute_overlap_null:
-        print(f"  Overlap permutation null ({n_overlap_perm} permutations) ...")
+        print(f"  Overlap permutation null ({n_overlap_perm} permutations, "
+              f"n_jobs={n_jobs}) ...")
+        k_values = tuple(range(2, n_methods_enabled + 1)) or (2,)
         null = overlap_permutation_null(
             X, y_labels, compute_vip_1comp, top_n=top_n,
-            k_values=(2, 3, 4, 5, 6), n_perm=n_overlap_perm, seed=random_state,
+            k_values=k_values, n_perm=n_overlap_perm, seed=random_state,
+            use_methods=use_methods, n_jobs=n_jobs,
         )
         overlap_df['overlap_null_freq'] = null['per_feature_null_freq'][overlap_list]
-        print("    observed vs null overlap size (features in >= k of 6 methods):")
-        for k in (2, 3, 4, 5, 6):
+        # NB: `counts` (observed votes) is computed by feature_importance_analysis
+        # over the SAME enabled method set, so observed and null share a
+        # denominator and the comparison is valid.
+        print(f"    observed vs null overlap size (features in >= k of "
+              f"{n_methods_enabled} methods):")
+        for k in k_values:
             obs_k = int(sum(1 for c in counts.values() if c >= k))
             nk = null['null_counts'][k]
             pk = empirical_p(obs_k, nk)

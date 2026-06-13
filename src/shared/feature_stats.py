@@ -28,6 +28,11 @@ All randomness is seeded; results are reproducible.
 
 import numpy as np
 from scipy import stats
+from joblib import Parallel, delayed
+from sklearn.preprocessing import LabelEncoder
+
+# Canonical ensemble method keys (PLS-DA VIP is keyed 'vip').
+_ALL_METHODS = ('rf', 'svm', 'gb', 'lr', 'ridge', 'vip')
 
 
 # ----------------------------------------------------------------------------- #
@@ -173,47 +178,63 @@ def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'
 # ----------------------------------------------------------------------------- #
 # Ensemble helper (shared by stability + null)                                    #
 # ----------------------------------------------------------------------------- #
-def _ensemble_top_sets(Xp, y_enc, y_labels, top_n, seed, vip_fn):
-    """Return a list of top-`top_n` index sets, one per available method.
+def _ensemble_top_sets(Xp, y_enc, y_labels, top_n, seed, vip_fn, use_methods=None):
+    """Return a list of top-`top_n` index sets, one per *enabled* method.
+
+    `use_methods` is an iterable of method keys drawn from
+    ('rf','svm','gb','lr','ridge','vip'). Only those methods are fit, so toggling
+    a model off in config (e.g. USE_GRADIENT_BOOSTING=False) omits it from the
+    stability/permutation ensemble — and, crucially, the consensus denominator
+    matches whatever the observed ensemble uses. None means "all six".
 
     Methods that fail on a degenerate resample (e.g. a class dropped by the
-    bootstrap) are silently skipped, so the returned list may be shorter than 6.
+    bootstrap) are silently skipped, so the returned list may be shorter.
     """
     from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
     from sklearn.svm import SVC
     from sklearn.linear_model import LogisticRegression, RidgeClassifier
 
+    if use_methods is None:
+        use_methods = set(_ALL_METHODS)
+    else:
+        use_methods = set(use_methods)
+
     importances = []
-    try:
-        rf = RandomForestClassifier(n_estimators=100, random_state=seed).fit(Xp, y_enc)
-        importances.append(rf.feature_importances_)
-    except Exception:
-        pass
-    try:
-        svm = SVC(kernel='linear', random_state=seed).fit(Xp, y_enc)
-        importances.append(np.abs(svm.coef_).mean(axis=0) if svm.coef_.ndim > 1
-                            else np.abs(svm.coef_).ravel())
-    except Exception:
-        pass
-    try:
-        gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                        max_depth=3, random_state=seed).fit(Xp, y_enc)
-        importances.append(gb.feature_importances_)
-    except Exception:
-        pass
-    try:
-        lr = LogisticRegression(max_iter=1000, random_state=seed).fit(Xp, y_enc)
-        importances.append(np.abs(lr.coef_).mean(axis=0) if lr.coef_.ndim > 1
-                           else np.abs(lr.coef_).ravel())
-    except Exception:
-        pass
-    try:
-        ridge = RidgeClassifier().fit(Xp, y_enc)
-        importances.append(np.abs(ridge.coef_).mean(axis=0) if ridge.coef_.ndim > 1
-                           else np.abs(ridge.coef_).ravel())
-    except Exception:
-        pass
-    if vip_fn is not None:
+    if 'rf' in use_methods:
+        try:
+            rf = RandomForestClassifier(n_estimators=100, random_state=seed).fit(Xp, y_enc)
+            importances.append(rf.feature_importances_)
+        except Exception:
+            pass
+    if 'svm' in use_methods:
+        try:
+            svm = SVC(kernel='linear', random_state=seed).fit(Xp, y_enc)
+            importances.append(np.abs(svm.coef_).mean(axis=0) if svm.coef_.ndim > 1
+                                else np.abs(svm.coef_).ravel())
+        except Exception:
+            pass
+    if 'gb' in use_methods:
+        try:
+            gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
+                                            max_depth=3, random_state=seed).fit(Xp, y_enc)
+            importances.append(gb.feature_importances_)
+        except Exception:
+            pass
+    if 'lr' in use_methods:
+        try:
+            lr = LogisticRegression(max_iter=1000, random_state=seed).fit(Xp, y_enc)
+            importances.append(np.abs(lr.coef_).mean(axis=0) if lr.coef_.ndim > 1
+                               else np.abs(lr.coef_).ravel())
+        except Exception:
+            pass
+    if 'ridge' in use_methods:
+        try:
+            ridge = RidgeClassifier().fit(Xp, y_enc)
+            importances.append(np.abs(ridge.coef_).mean(axis=0) if ridge.coef_.ndim > 1
+                               else np.abs(ridge.coef_).ravel())
+        except Exception:
+            pass
+    if 'vip' in use_methods and vip_fn is not None:
         try:
             importances.append(np.asarray(vip_fn(Xp, y_labels)))
         except Exception:
@@ -234,20 +255,52 @@ def _consensus_counts(top_sets, n_features):
 # ----------------------------------------------------------------------------- #
 # Group-aware bootstrap selection frequency                                       #
 # ----------------------------------------------------------------------------- #
+def _one_bootstrap(child_seed, X_filt_raw, y_labels, groups, uniq_groups,
+                   preprocess_fn, vip_fn, normalization, log_transform, scaling,
+                   top_n, min_methods, n_features, use_methods):
+    """Single colony-bootstrap replicate. Returns a boolean (n_features,) mask
+    of features that cleared the consensus rule, or None if the resample was
+    degenerate. Pure function of `child_seed` -> deterministic & worker-safe."""
+    rng = np.random.default_rng(child_seed)
+    drawn = rng.choice(uniq_groups, size=uniq_groups.size, replace=True)
+    idx = np.concatenate([np.where(groups == g)[0] for g in drawn])
+    yb = y_labels[idx]
+    if np.unique(yb).size < 2:
+        return None
+    Xb = preprocess_fn(X_filt_raw[idx].copy(), normalization=normalization,
+                       log_transform=log_transform, scaling=scaling)
+    yb_enc = LabelEncoder().fit_transform(yb)
+    # Independent integer seed for the estimators, drawn from this worker's rng.
+    model_seed = int(rng.integers(0, 2**31 - 1))
+    top_sets = _ensemble_top_sets(Xb, yb_enc, yb, top_n, model_seed, vip_fn,
+                                  use_methods)
+    if len(top_sets) < 2:
+        return None
+    counts = _consensus_counts(top_sets, n_features)
+    return counts >= min_methods
+
+
 def bootstrap_selection_frequency(X_filt_raw, y_labels, groups, preprocess_fn,
                                   vip_fn, normalization='tic',
                                   log_transform='log10', scaling='autoscale',
-                                  top_n=50, min_methods=2, n_boot=200, seed=42):
+                                  top_n=50, min_methods=2, n_boot=200, seed=42,
+                                  use_methods=None, n_jobs=-1):
     """Fraction of colony-bootstrap resamples in which each feature is selected.
 
     A feature is 'selected' in a bootstrap if it appears in the top-`top_n` of
-    at least `min_methods` of the ensemble methods — the same consensus rule
-    used for the reported list. Colonies (unique `groups`) are resampled WITH
-    replacement so the unit of resampling is the biological replicate, never the
-    technical replicate (consistent with the grouped CV).
+    at least `min_methods` of the ENABLED ensemble methods (see `use_methods`) —
+    the same consensus rule used for the reported list. Colonies (unique
+    `groups`) are resampled WITH replacement so the unit of resampling is the
+    biological replicate, never the technical replicate (consistent with the
+    grouped CV). Preprocessing is re-fit on each bootstrap (no full-data leak).
 
-    Preprocessing (normalise / transform / scale) is re-fit on each bootstrap,
-    so the stability estimate does not leak full-data scaling.
+    Parallelism & reproducibility
+    -----------------------------
+    The `n_boot` replicates are independent and run across all cores with
+    `joblib.Parallel(n_jobs=n_jobs)`. Each replicate gets its own child stream
+    from `np.random.SeedSequence(seed).spawn(n_boot)`, so results are
+    statistically independent AND bit-for-bit reproducible regardless of
+    `n_jobs` or worker scheduling.
 
     Parameters
     ----------
@@ -256,38 +309,38 @@ def bootstrap_selection_frequency(X_filt_raw, y_labels, groups, preprocess_fn,
         columns are aligned 1:1 with the reported feature matrix.
     preprocess_fn : callable(X, normalization, log_transform, scaling) -> X
     vip_fn : callable(X, y_labels) -> importances  (PLS-DA VIP)
+    use_methods : iterable of {'rf','svm','gb','lr','ridge','vip'} or None
+        Methods to include; None = all six. Pass the config-derived set so a
+        globally disabled model is also dropped here.
+    n_jobs : int
+        Cores for joblib (-1 = all).
 
     Returns
     -------
     freq : ndarray (n_features,)   selection frequency in [0, 1]
     n_used : int                   number of bootstraps that were usable
     """
-    from sklearn.preprocessing import LabelEncoder
-
     X_filt_raw = np.asarray(X_filt_raw, dtype=float)
     y_labels = np.asarray(y_labels)
     groups = np.asarray(groups)
     n_features = X_filt_raw.shape[1]
     uniq_groups = np.unique(groups)
-    rng = np.random.default_rng(seed)
+    child_seeds = np.random.SeedSequence(seed).spawn(n_boot)
+
+    masks = Parallel(n_jobs=n_jobs)(
+        delayed(_one_bootstrap)(
+            cs, X_filt_raw, y_labels, groups, uniq_groups, preprocess_fn, vip_fn,
+            normalization, log_transform, scaling, top_n, min_methods,
+            n_features, use_methods)
+        for cs in child_seeds
+    )
 
     hit = np.zeros(n_features, dtype=float)
     n_used = 0
-    for b in range(n_boot):
-        drawn = rng.choice(uniq_groups, size=uniq_groups.size, replace=True)
-        idx = np.concatenate([np.where(groups == g)[0] for g in drawn])
-        yb = y_labels[idx]
-        if np.unique(yb).size < 2:
-            continue  # degenerate resample — skip
-        Xb = preprocess_fn(X_filt_raw[idx].copy(), normalization=normalization,
-                           log_transform=log_transform, scaling=scaling)
-        yb_enc = LabelEncoder().fit_transform(yb)
-        top_sets = _ensemble_top_sets(Xb, yb_enc, yb, top_n, seed + b, vip_fn)
-        if len(top_sets) < 2:
-            continue
-        counts = _consensus_counts(top_sets, n_features)
-        hit[counts >= min_methods] += 1.0
-        n_used += 1
+    for m in masks:
+        if m is not None:
+            hit[m] += 1.0
+            n_used += 1
 
     freq = hit / n_used if n_used else np.zeros(n_features)
     return freq, n_used
@@ -296,14 +349,40 @@ def bootstrap_selection_frequency(X_filt_raw, y_labels, groups, preprocess_fn,
 # ----------------------------------------------------------------------------- #
 # Label-permutation null for the overlap counts                                   #
 # ----------------------------------------------------------------------------- #
+def _one_permutation(child_seed, X_scaled, y_labels, vip_fn, top_n, k_values,
+                     n_features, use_methods):
+    """Single label-permutation replicate. Returns (per_k_counts_dict,
+    feature_hit_mask) or None if degenerate. Pure function of `child_seed`."""
+    rng = np.random.default_rng(child_seed)
+    yp = rng.permutation(y_labels)
+    yp_enc = LabelEncoder().fit_transform(yp)
+    model_seed = int(rng.integers(0, 2**31 - 1))
+    top_sets = _ensemble_top_sets(X_scaled, yp_enc, yp, top_n, model_seed, vip_fn,
+                                  use_methods)
+    if len(top_sets) < 2:
+        return None
+    counts = _consensus_counts(top_sets, n_features)
+    per_k = {k: int((counts >= k).sum()) for k in k_values}
+    k_min = min(k_values)
+    return per_k, (counts >= k_min)
+
+
 def overlap_permutation_null(X_scaled, y_labels, vip_fn, top_n=50,
-                             k_values=(2, 3, 4, 5, 6), n_perm=200, seed=42):
+                             k_values=(2, 3, 4, 5, 6), n_perm=200, seed=42,
+                             use_methods=None, n_jobs=-1):
     """Null distribution of the cross-method overlap under label permutation.
 
     Preprocessing is label-independent, so the already-scaled descriptive matrix
     `X_scaled` is reused and only the labels are permuted. For each permutation
-    the ensemble is recomputed and the number of features reaching
-    "top-N in >= k methods" is recorded for every k in `k_values`.
+    the ENABLED ensemble (see `use_methods`) is recomputed and the number of
+    features reaching "top-N in >= k methods" is recorded for every k.
+
+    Parallelism & reproducibility
+    -----------------------------
+    The `n_perm` permutations run across all cores with
+    `joblib.Parallel(n_jobs=n_jobs)`. Each permutation draws from its own child
+    stream of `np.random.SeedSequence(seed).spawn(n_perm)`, so the null is
+    independent and reproducible irrespective of `n_jobs`.
 
     Returns
     -------
@@ -314,29 +393,29 @@ def overlap_permutation_null(X_scaled, y_labels, vip_fn, top_n=50,
             fraction of permutations in which each feature reached >= min(k)
             methods — a per-feature empirical selection p-value.
     """
-    from sklearn.preprocessing import LabelEncoder
-
     X_scaled = np.asarray(X_scaled, dtype=float)
     y_labels = np.asarray(y_labels)
     n_features = X_scaled.shape[1]
-    rng = np.random.default_rng(seed)
     k_min = min(k_values)
+    child_seeds = np.random.SeedSequence(seed).spawn(n_perm)
 
-    null_counts = {k: np.zeros(n_perm, dtype=float) for k in k_values}
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(_one_permutation)(
+            cs, X_scaled, y_labels, vip_fn, top_n, k_values, n_features,
+            use_methods)
+        for cs in child_seeds
+    )
+
+    null_counts = {k: np.full(n_perm, np.nan, dtype=float) for k in k_values}
     per_feature_hits = np.zeros(n_features, dtype=float)
     n_used = 0
-    for i in range(n_perm):
-        yp = rng.permutation(y_labels)
-        yp_enc = LabelEncoder().fit_transform(yp)
-        top_sets = _ensemble_top_sets(X_scaled, yp_enc, yp, top_n, seed + i, vip_fn)
-        if len(top_sets) < 2:
-            for k in k_values:
-                null_counts[k][i] = np.nan
+    for i, r in enumerate(results):
+        if r is None:
             continue
-        counts = _consensus_counts(top_sets, n_features)
+        per_k, feat_hit = r
         for k in k_values:
-            null_counts[k][i] = int((counts >= k).sum())
-        per_feature_hits[counts >= k_min] += 1.0
+            null_counts[k][i] = per_k[k]
+        per_feature_hits[feat_hit] += 1.0
         n_used += 1
 
     per_feature_null_freq = (per_feature_hits / n_used if n_used
@@ -345,6 +424,22 @@ def overlap_permutation_null(X_scaled, y_labels, vip_fn, top_n=50,
             'per_feature_null_freq': per_feature_null_freq,
             'n_used': n_used,
             'k_min': k_min}
+
+
+def enabled_methods_from_config(cfg):
+    """Build the set of enabled ensemble method keys from a config module's
+    USE_* flags. PLS-DA VIP ('vip') has no toggle and is always included.
+    Returns all six methods if `cfg` is None."""
+    if cfg is None:
+        return set(_ALL_METHODS)
+    s = set()
+    if getattr(cfg, 'USE_RANDOM_FOREST', True):       s.add('rf')
+    if getattr(cfg, 'USE_SVM', True):                 s.add('svm')
+    if getattr(cfg, 'USE_GRADIENT_BOOSTING', True):   s.add('gb')
+    if getattr(cfg, 'USE_LOGISTIC_REGRESSION', True): s.add('lr')
+    if getattr(cfg, 'USE_RIDGE', True):               s.add('ridge')
+    s.add('vip')
+    return s
 
 
 def empirical_p(observed, null_samples):

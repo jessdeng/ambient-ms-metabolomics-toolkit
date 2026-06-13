@@ -226,6 +226,12 @@ N_OVERLAP_PERMUTATIONS = 200
 RUN_PLSDA_Q2 = True
 N_Q2_PERMUTATIONS = 200
 
+# ── Parallelism ───────────────────────────────────────────────────────────────────
+# Cores for the parallel bootstrap-stability and overlap-null loops (joblib).
+# -1 = use all available cores; 1 = serial (useful for debugging). Results are
+# identical regardless of this value (each replicate has an independent seed).
+N_JOBS = -1
+
 
 # ── Feature Importance Overlap ─────────────────────────────────────────────────
 # How many top features to take from each method when looking for overlap.
