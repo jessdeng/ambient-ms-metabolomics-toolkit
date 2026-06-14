@@ -17,54 +17,108 @@ import pandas as pd
 
 def load_experiment(experiment_dir):
     """
-    Read all CSVs and TXTs from the experiment folder.
-    Each direct subfolder = one class/group.
-    Each CSV/TXT inside = one sample.
-    Interpolates all samples onto a common m/z axis.
-    Returns X (n_samples × n_features), labels array, sample names, mz axis.
+    Read all CSVs and TXTs under the experiment folder using DIRECTORY TOPOLOGY.
+    Filenames are never parsed for metadata.
+
+    Topology rule (filename-agnostic)
+    ----------------------------------
+    * Any sub-folder that DIRECTLY contains raw data files is one biological
+      sample / condition. The folder's own name is the sample id.
+    * That folder's PARENT directory name is the class label (``y_labels``).
+      If a sample folder sits directly inside ``experiment_dir`` (legacy 2-level
+      layout) there is no class level above it, so the folder is used as its own
+      class and a warning is printed — grouped CV then has only one biological
+      sample per class.
+    * The data files inside a sample folder are technical replicates of that
+      sample. They are sorted alphabetically and assigned replicate indices
+      1, 2, 3 ...  No part of the filename is inspected to decide this.
+
+    All samples are interpolated onto a common m/z axis.
+
+    Returns
+    -------
+    X      : ndarray (n_samples, n_features)
+    labels : ndarray (n_samples,)   — class label per sample (parent folder)
+    names  : list[str]              — each file's path RELATIVE to
+             ``experiment_dir`` in POSIX form (e.g. 'Amber/colony_A/inj_03.csv').
+             This carries the sample+class topology so make_groups() can rebuild
+             leak-free CV groups from the directory structure alone.
+    mz     : ndarray (n_features,)  — the common m/z axis
     """
+    experiment_dir = os.path.abspath(experiment_dir)
     samples, labels, names = [], [], []
     raw_mz_list = []
 
-    group_folders = sorted([
-        d for d in os.listdir(experiment_dir)
-        if os.path.isdir(os.path.join(experiment_dir, d))
-    ])
-
-    for group in group_folders:
+    # 1. Discover every folder that DIRECTLY contains data files. Each such
+    #    folder is one biological sample. Walk deterministically and skip
+    #    hidden directories (e.g. .git, .ipynb_checkpoints).
+    sample_dirs = []
+    for dirpath, dirnames, filenames in os.walk(experiment_dir):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith('.'))
+        if os.path.abspath(dirpath) == experiment_dir:
+            continue  # the root itself is not a sample folder
         data_files = sorted(
-            glob.glob(os.path.join(experiment_dir, group, '*.csv')) +
-            glob.glob(os.path.join(experiment_dir, group, '*.txt'))
+            f for f in filenames
+            if f.lower().endswith(('.csv', '.txt')) and not f.startswith('.')
         )
-        if not data_files:
-            print(f"  [warning] No CSV or TXT files in '{group}', skipping.")
-            continue
+        if data_files:
+            sample_dirs.append((dirpath, data_files))
+    sample_dirs.sort(key=lambda t: t[0])
 
-        for file_path in data_files:
-            sep = '\t' if file_path.endswith('.txt') else ','
+    if not sample_dirs:
+        raise ValueError(
+            f"No .csv/.txt data files found in any sub-folder of {experiment_dir!r}."
+        )
+
+    for dirpath, data_files in sample_dirs:
+        dirpath_norm = dirpath.rstrip(os.sep)
+        sample_id    = os.path.basename(dirpath_norm)            # leaf folder
+        parent       = os.path.dirname(dirpath_norm)             # one level up
+
+        if os.path.abspath(parent) == experiment_dir:
+            # 2-level layout: no class folder above the sample folder.
+            class_label = sample_id
+            print(f"  [warning] '{sample_id}' sits directly under the experiment "
+                  f"root, so it is treated as BOTH the class and its only "
+                  f"biological sample. Grouped cross-validation needs >= 2 "
+                  f"samples per class — nest sample folders one level deeper "
+                  f"(experiment/<condition>/<sample>/files) for leak-free CV.")
+        else:
+            class_label = os.path.basename(parent)
+
+        # Files sorted alphabetically => technical replicates 1, 2, 3 ...
+        for rep_idx, fname in enumerate(data_files, start=1):
+            file_path = os.path.join(dirpath, fname)
+            sep = '\t' if fname.lower().endswith('.txt') else ','
             df = pd.read_csv(file_path, sep=sep, encoding='utf-8-sig')
             df.columns = df.columns.str.lstrip('﻿').str.strip()
             col_map = {c.lower(): c for c in df.columns}
-            col_map['mz'] = col_map.get('mz') or col_map.get('mass/charge')
-            col_map['int'] = col_map.get('int') or col_map.get('intensity')
+            mz_col  = col_map.get('mz')  or col_map.get('mass/charge')
+            int_col = col_map.get('int') or col_map.get('intensity')
 
-            if col_map['mz'] is None or col_map['int'] is None:
-                print(f"  [warning] Skipping {os.path.basename(file_path)}: "
-                      f"could not find m/z or intensity columns. "
-                      f"Found: {list(df.columns)}")
+            if mz_col is None or int_col is None:
+                print(f"  [warning] Skipping {fname}: could not find m/z or "
+                      f"intensity columns. Found: {list(df.columns)}")
                 continue
 
-            raw_mz_list.append(df[col_map['mz']].values)
-            samples.append(df[col_map['int']].values)
-            labels.append(group.strip())
-            names.append(os.path.basename(file_path))
+            raw_mz_list.append(df[mz_col].values)
+            samples.append(df[int_col].values)
+            labels.append(class_label.strip())
+            # Relative POSIX path = the topology carrier consumed by make_groups.
+            rel = os.path.relpath(file_path, experiment_dir).replace(os.sep, '/')
+            names.append(rel)
 
-    # Build a common m/z axis covering the overlap range across all files
+    if not raw_mz_list:
+        raise ValueError(
+            "No readable spectra: every file was missing m/z / intensity columns."
+        )
+
+    # 2. Build a common m/z axis covering the overlap range across all files.
     mz_min = max(mz.min() for mz in raw_mz_list)
     mz_max = min(mz.max() for mz in raw_mz_list)
     common_mz = np.linspace(mz_min, mz_max, num=5000)
 
-    # Interpolate every sample onto the common axis
+    # Interpolate every sample onto the common axis.
     interpolated = []
     for mz_i, int_i in zip(raw_mz_list, samples):
         interp_int = np.interp(common_mz, mz_i, int_i)

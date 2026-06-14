@@ -281,21 +281,10 @@ class Scaler(BaseEstimator, TransformerMixin):
 
 # -- Grouping + preprocessor helpers ------------------------------------------
 
-def make_groups(y_labels, names):
-    """
-    Build a cross-validation group label per sample so that technical
-    replicates of one colony share a group and never split across folds.
-
-    group = '<condition>::<well>'  e.g. 'Amber::A6'
-
-    Parsed from the filename token immediately before T<n> (e.g. A6T1 -> A6).
-    Falls back to the filename if the pattern is absent.
-    """
-    groups = []
-    for lab, nm in zip(y_labels, names):
-        m = re.search(r'([A-Za-z]\d+)[Tt]\d+\.(?:csv|txt)$', str(nm))
-        groups.append(f"{lab}::{m.group(1)}" if m else f"{lab}::{nm}")
-    return np.array(groups)
+# Grouping logic lives in shared/grouping.py so both pipelines share one flexible,
+# rename-free implementation (auto-detects replicate suffixes like *_01/_02/_03 or
+# *T1/T2, with config overrides). Re-exported here for backward-compatible imports.
+from src.shared.grouping import make_groups, summarize_groups  # noqa: E402,F401
 
 
 def make_preprocessor(normalization='tic', log_transform='log10',
