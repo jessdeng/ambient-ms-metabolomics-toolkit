@@ -1,0 +1,40 @@
+{
+  "_comment": "TEMPLATE. Copy this file to 'config.json' and edit the values for your own experiment. config.json is git-ignored, so your personal settings stay local and are never committed. Any key here overrides the defaults in config.py; you only need to keep the keys you actually change.",
+
+  "EXPERIMENT": "your_experiment_folder",
+
+  "MZ_MIN": 100,
+  "MZ_MAX": 1000,
+  "BIN_WIDTH": 0.5,
+
+  "NORMALIZATION": "tic",
+  "LOG_TRANSFORM": "glog",
+  "SCALING": "autoscale",
+
+  "VARIANCE_PERCENTILE": 25,
+  "ABUNDANCE_PERCENTILE": 5,
+
+  "_snr_comment": "SNR floor: set SNR_FLOOR_ENABLED=true to strip flat baseline bins (recommended for the standard pipeline).",
+  "SNR_FLOOR_ENABLED": true,
+  "SNR_THRESHOLD": 3,
+  "NOISE_QUANTILE": 60,
+  "MIN_FRACTION_IN_GROUP": 0.5,
+
+  "RANDOM_SEED": 42,
+  "CV_FOLDS": 5,
+  "N_CV_REPEATS": 10,
+
+  "_stats_comment": "Univariate test + FDR, bootstrap stability, overlap null, and PLS-DA Q2 diagnostics. Lower the iteration counts (or set the RUN_* flags false) for faster iteration.",
+  "UNIVARIATE_TEST": "auto",
+  "RUN_FEATURE_STABILITY": true,
+  "N_BOOTSTRAP": 200,
+  "RUN_OVERLAP_PERMUTATION": true,
+  "N_OVERLAP_PERMUTATIONS": 200,
+  "RUN_PLSDA_Q2": true,
+  "N_Q2_PERMUTATIONS": 200,
+
+  "N_JOBS": -1,
+
+  "RUN_PERMUTATION_TEST": true,
+  "N_PERMUTATIONS": 100
+}

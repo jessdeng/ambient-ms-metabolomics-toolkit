@@ -87,8 +87,10 @@ conda activate ambient-ms
 #    data/<EXPERIMENT>/Group1/sample_W1T1.csv
 #    data/<EXPERIMENT>/Group2/sample_W2T1.csv  ...
 
-# 4. Set your experiment name in config.json
-#    { "EXPERIMENT": "<your_experiment_folder>" }
+# 4. Create your local config from the template, then set your experiment name
+cp config.example.json config.json
+#    edit config.json:  { "EXPERIMENT": "<your_experiment_folder>" }
+#    (config.json is git-ignored, so your settings stay local)
 
 # 5. Run from the repository root (the folder containing config.py)
 python -m src.standard.run_analysis
@@ -101,7 +103,11 @@ python -m src.standard.extras
 
 ## Configuration (config.json)
 
-Edit `config.json` in the repository root — no Python editing required:
+Copy `config.example.json` to `config.json` (`cp config.example.json config.json`),
+then edit `config.json` in the repository root — no Python editing required.
+`config.json` is git-ignored so your personal settings are never committed; the
+tracked `config.example.json` is just a template. If no `config.json` exists, the
+pipeline falls back to the defaults in `config.py`:
 
 ```json
 {

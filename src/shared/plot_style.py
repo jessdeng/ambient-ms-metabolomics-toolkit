@@ -30,11 +30,18 @@ import seaborn as sns
 # rcParams dict — all plots in the pipeline should conform to this spec
 # ---------------------------------------------------------------------------
 
-_FONT_FAMILY = ['Arial', 'DejaVu Sans', 'Helvetica Neue', 'Helvetica', 'sans-serif']
+# Sans-serif fallback chain. 'DejaVu Sans' ships with matplotlib, so it is
+# present on every machine — keeping it in the list guarantees a match and
+# avoids the "findfont: Font Family 'Helvetica' not found" warning on systems
+# that don't have Arial/Helvetica installed. Arial/Liberation Sans are used
+# first when available (Mac/Windows/most Linux) for a near-identical look.
+_FONT_FAMILY = ['Arial', 'Liberation Sans', 'DejaVu Sans', 'sans-serif']
 
 PUB_RCPARAMS = {
-    # Font
-    'font.family':          _FONT_FAMILY,
+    # Font — use the generic 'sans-serif' family backed by the fallback list
+    # below; this is matplotlib's recommended, warning-free idiom.
+    'font.family':          'sans-serif',
+    'font.sans-serif':      _FONT_FAMILY,
     'font.size':            10,
     'axes.labelsize':       10,
     'axes.titlesize':       11,
