@@ -1,7 +1,3 @@
-# Personal experiment config — keep local settings out of the repo.
-# Each user copies config.example.json -> config.json and edits it.
-config.json
-
 # Data — never commit raw mass spec files (exceptions for scaffold files)
 data/*
 !data/.gitkeep

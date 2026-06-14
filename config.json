@@ -1,5 +1,5 @@
 {
-  "_comment": "TEMPLATE. Copy this file to 'config.json' and edit the values for your own experiment. config.json is git-ignored, so your personal settings stay local and are never committed. Any key here overrides the defaults in config.py; you only need to keep the keys you actually change.",
+  "_comment": "Edit this file to configure your experiment. Values here override config.py defaults. Only the fields you change need to be present. Set EXPERIMENT to the name of your data folder under data/.",
 
   "EXPERIMENT": "your_experiment_folder",
 
