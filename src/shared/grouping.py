@@ -5,36 +5,25 @@ Cross-validation must keep the technical replicates of one biological sample
 together (same colony/well/injection), otherwise a near-identical replicate
 lands in both train and test and accuracy is inflated to ~1.0 (pseudoreplication).
 
-The only thing the pipeline needs is: *which files are replicates of the same
-sample?* This module answers that purely from the DIRECTORY STRUCTURE — the
-filenames are never parsed for metadata.
+Grouping is derived **purely from the directory structure**. Filenames are never
+parsed for metadata, and there is no regex/filename fallback.
 
 Topology contract
-------------------
+-----------------
 ``load_experiment()`` returns each sample's file path RELATIVE to the experiment
-directory (POSIX form, e.g. ``'Amber/colony_A/inj_03.csv'``). The folder that
-directly contains a file is that file's biological sample; every file sharing
-that folder is a technical replicate of the same sample. ``make_groups`` reads
-the containing-folder name straight off that relative path.
+directory (POSIX form, e.g. ``'Amber/colony_A/inj_03.csv'``). The rules are:
 
-Modes (``mode`` argument; default 'auto'):
-  'auto'      (default) — biological sample id = name of the folder that
-                          directly contains the file (directory topology).
-                          All replicates in a folder share one CV group.
-  'per_file'            — treat every file as its own independent biological
-                          sample (correct only if there are NO technical
-                          replicates). Produces optimistic CV when replicates
-                          actually exist.
-  'regex'               — escape hatch: apply a custom regex to the relative
-                          path; the first capture group is the sample id.
+  * The folder that DIRECTLY contains a file is that file's biological sample;
+    the folder's name is the sample id.
+  * Every file sharing that folder is a technical replicate of the same sample,
+    so they all receive the same CV group and never split across folds.
 
-There is also ``groups_from_csv()`` for a fully explicit mapping when the
-directory layout cannot express the grouping, and ``assign_replicate_indices()``
-to recover the 1-based technical-replicate number of each file (alphabetical
-within its folder) for metadata/auditing.
+``make_groups`` reads the containing-folder name straight off the relative path.
+If a path carries no directory component it raises — it does not guess from the
+filename. ``assign_replicate_indices`` recovers the 1-based technical-replicate
+number of each file (alphabetical within its folder) for metadata/auditing.
 """
 
-import os
 import re
 import posixpath
 import numpy as np
@@ -48,65 +37,63 @@ def _posix(name):
 
 
 def _stem(name):
-    """Filename without directory or .csv/.txt extension."""
+    """Filename without directory or .csv/.txt extension (display only)."""
     return _EXT_RE.sub('', posixpath.basename(_posix(name))).strip()
 
 
 def _sample_folder(name):
     """Biological-sample id = name of the directory that directly contains the
     file. ``name`` is a path relative to the experiment dir, as produced by
-    load_experiment(). Returns None when the name carries no directory
-    component (so the caller can fall back instead of collapsing every file
-    into one group). Filenames are never parsed."""
+    load_experiment(). Returns None when the path has no directory component."""
     parent = posixpath.dirname(_posix(name))
     if not parent:
         return None
     return posixpath.basename(parent)
 
 
-def make_groups(y_labels, names, mode='auto', regex=None, verbose=False):
+def make_groups(y_labels, names, verbose=False):
     """Build a CV group label per sample: '<class>::<sample_id>'.
 
-    Topology-based (default 'auto'): the sample id is the name of the folder
-    that directly contains the file — i.e. the directory structure, NOT the
-    filename. All technical replicates inside one folder therefore share a
-    group and can never straddle the train/test split.
+    The sample id is the name of the folder that directly contains the file —
+    i.e. the directory structure, never the filename. All technical replicates
+    inside one folder therefore share a group and can never straddle the
+    train/test split.
 
     ``names`` must be the file paths RELATIVE to the experiment dir, exactly as
-    returned by load_experiment(). The return value is unchanged: an ndarray of
-    '<class>::<sample_id>' strings, one per sample, ready for StratifiedGroupKFold.
+    returned by load_experiment(). A name without a directory component is a
+    programming/topology error and raises ValueError — there is deliberately no
+    fallback to filename parsing.
 
-    Backward compatible: ``make_groups(y_labels, names)`` keeps working.
+    Returns an ndarray of '<class>::<sample_id>' strings, one per sample, ready
+    for StratifiedGroupKFold.
     """
     y_labels = np.asarray(y_labels)
-    custom = re.compile(regex) if (mode == 'regex' and regex) else None
+    if len(y_labels) != len(names):
+        raise ValueError(
+            f"y_labels ({len(y_labels)}) and names ({len(names)}) length mismatch."
+        )
 
     groups = []
-    missing = 0
+    bad = []
     for lab, nm in zip(y_labels, names):
-        if mode == 'per_file':
-            token = _stem(nm)
-        elif custom is not None:
-            mm = custom.search(_posix(nm))
-            token = mm.group(1) if (mm and mm.groups()) else _stem(nm)
-        else:  # 'auto' — directory topology
-            token = _sample_folder(nm)
-            if token is None:
-                # Name had no folder component; fall back to per-file so CV can
-                # still run, and flag it so the user can pass proper paths.
-                token = _stem(nm)
-                missing += 1
-        groups.append(f"{lab}::{token}")
+        folder = _sample_folder(nm)
+        if folder is None:
+            bad.append(str(nm))
+            continue
+        groups.append(f"{lab}::{folder}")
 
-    if missing and mode == 'auto':
-        print(f"  [warning] {missing} sample name(s) carried no directory "
-              f"component, so their biological-sample id fell back to the "
-              f"filename. Pass the relative paths returned by load_experiment() "
-              f"so grouping stays purely topology-based.")
+    if bad:
+        raise ValueError(
+            "make_groups requires directory-topology paths (relative to the "
+            "experiment dir, e.g. '<condition>/<sample>/<file>.csv'). These "
+            f"names carried no folder and cannot be grouped without parsing the "
+            f"filename: {bad[:5]}{' ...' if len(bad) > 5 else ''}. Pass the "
+            "names returned by load_experiment()."
+        )
 
     groups = np.array(groups)
     if verbose:
-        summarize_groups(y_labels, names, groups, mode)
+        summarize_groups(y_labels, names, groups)
     return groups
 
 
@@ -132,13 +119,13 @@ def assign_replicate_indices(names):
     return idx
 
 
-def summarize_groups(y_labels, names, groups, mode='auto'):
+def summarize_groups(y_labels, names, groups):
     """Print how files were grouped, and warn about the two failure modes that
     silently break cross-validation: no grouping at all, or <2 groups in a class."""
     y_labels = np.asarray(y_labels)
     n_files  = len(groups)
     n_groups = len(set(groups))
-    print(f"  Sample grouping (mode='{mode}'): {n_files} files -> "
+    print(f"  Sample grouping (directory topology): {n_files} files -> "
           f"{n_groups} biological sample group(s)")
 
     # Show a couple of examples so the user can eyeball correctness.
@@ -150,12 +137,11 @@ def summarize_groups(y_labels, names, groups, mode='auto'):
         print(f"    e.g. '{label}'  <-  {', '.join(members[:4])}"
               + (" ..." if len(members) > 4 else ""))
 
-    if n_groups == n_files and mode != 'per_file':
-        print("  [warning] No replicates were detected — every file became its "
-              "own group. If your files include technical replicates of the same "
-              "sample, cross-validation accuracy will be OPTIMISTIC. Each sample "
-              "folder should contain all of that sample's replicate files "
-              "(experiment/<condition>/<sample>/rep1, rep2, ...).")
+    if n_groups == n_files:
+        print("  [warning] Every file became its own group — no folder contains "
+              "more than one file, so no technical replicates were detected. If "
+              "replicates exist, place all replicate files of a sample in that "
+              "sample's folder (experiment/<condition>/<sample>/rep1, rep2, ...).")
 
     # Per-class group count — grouped CV needs >= 2 biological groups per class.
     classes = np.unique(y_labels)
@@ -170,13 +156,3 @@ def summarize_groups(y_labels, names, groups, mode='auto'):
               f"{msg}. Grouped cross-validation cannot estimate generalisation "
               f"for them and will raise an error — you need at least two "
               f"independent sample folders per class.")
-
-
-def groups_from_csv(names, csv_path, file_col='file', group_col='sample'):
-    """Explicit grouping from a metadata CSV (filename -> sample id). Use when the
-    directory layout cannot express the grouping. Matches on the file's basename
-    and falls back to the filename for any file missing from the table."""
-    import pandas as pd
-    table = pd.read_csv(csv_path)
-    lookup = dict(zip(table[file_col].astype(str), table[group_col].astype(str)))
-    return np.array([lookup.get(_stem(nm), _stem(nm)) for nm in names])

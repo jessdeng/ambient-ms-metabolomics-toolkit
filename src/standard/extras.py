@@ -47,8 +47,9 @@ from shared.classifier_comparison_standard import (
     RandomForest, svm_classify, gradient_boosting,
     logistic_regression, lda_classify, ridge_classify,
     feature_importance_analysis,
-    make_groups, make_preprocessor, auto_n_splits,
+    make_preprocessor, auto_n_splits,
 )
+from shared.grouping import make_groups
 
 BASE_DIR = _ROOT
 

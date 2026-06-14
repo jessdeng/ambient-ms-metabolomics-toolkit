@@ -42,8 +42,9 @@ from r_comparable.pipeline import compute_vip_1comp, fit_plsda
 from shared.classifier_comparison import (
     random_forest,
     feature_importance_analysis,
-    make_groups, make_preprocessor, auto_n_splits,
+    make_preprocessor, auto_n_splits,
 )
+from shared.grouping import make_groups
 
 # ── Per-pipeline default resolution ──────────────────────────────────────────
 _json_keys     = getattr(config, '_json_keys', set())

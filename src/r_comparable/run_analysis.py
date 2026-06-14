@@ -33,8 +33,9 @@ from shared.classifier_comparison import (
     random_forest, svm_classify, gradient_boosting,
     logistic_regression, lda_classify, ridge_classify,
     plot_accuracy_comparison, feature_importance_analysis,
-    make_groups, make_preprocessor, auto_n_splits,
+    make_preprocessor, auto_n_splits,
 )
+from shared.grouping import make_groups
 from shared.visualization import plot_spectrum_with_features
 
 BASE_DIR   = _ROOT

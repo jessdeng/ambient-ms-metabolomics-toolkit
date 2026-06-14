@@ -22,7 +22,6 @@ Classifiers: Random Forest, SVM (linear), Gradient Boosting,
 """
 
 import warnings
-import re
 
 import numpy as np
 import pandas as pd
@@ -279,12 +278,10 @@ class Scaler(BaseEstimator, TransformerMixin):
         raise ValueError(f"Unknown scaling: '{self.method}'")
 
 
-# -- Grouping + preprocessor helpers ------------------------------------------
-
-# Grouping logic lives in shared/grouping.py so both pipelines share one flexible,
-# rename-free implementation (auto-detects replicate suffixes like *_01/_02/_03 or
-# *T1/T2, with config overrides). Re-exported here for backward-compatible imports.
-from src.shared.grouping import make_groups, summarize_groups  # noqa: E402,F401
+# -- Preprocessor helper -------------------------------------------------------
+# CV sample grouping lives in shared/grouping.py (directory-topology based) and
+# is imported directly by the pipeline modules — it is intentionally not
+# re-exported here.
 
 
 def make_preprocessor(normalization='tic', log_transform='log10',
