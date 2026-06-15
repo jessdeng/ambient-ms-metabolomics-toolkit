@@ -445,6 +445,8 @@ def grouped_permutation_importance(X_binned, y_labels, groups, prep_steps, mz,
     models = [m for m in models if m in est_factory]
     fold_imp = {m: [] for m in models}
 
+    import joblib
+
     for r in range(max(1, n_repeats)):
         sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
                                     random_state=random_state + r)
@@ -454,12 +456,18 @@ def grouped_permutation_importance(X_binned, y_labels, groups, prep_steps, mz,
                          + [('clf', est_factory[m]())])
                 pipe = Pipeline(steps)
                 with warnings.catch_warnings():
+                    # Small grouped test folds in a many-class design can lack a
+                    # class, so balanced_accuracy emits a cosmetic "y_pred contains
+                    # classes not in y_true" warning. The 'threading' backend runs
+                    # the permutation workers in-process so this suppression also
+                    # covers them (a loky/process backend would not).
                     warnings.simplefilter('ignore')
                     pipe.fit(X_binned[tr], y[tr])
-                    pi = permutation_importance(
-                        pipe, X_binned[te], y[te], scoring=scoring,
-                        n_repeats=n_perm_repeats, random_state=random_state + r,
-                        n_jobs=n_jobs)
+                    with joblib.parallel_backend('threading'):
+                        pi = permutation_importance(
+                            pipe, X_binned[te], y[te], scoring=scoring,
+                            n_repeats=n_perm_repeats,
+                            random_state=random_state + r, n_jobs=n_jobs)
                 fold_imp[m].append(pi.importances_mean)
 
     df = pd.DataFrame({'mz': np.asarray(mz)})
