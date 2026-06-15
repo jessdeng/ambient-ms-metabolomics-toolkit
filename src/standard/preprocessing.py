@@ -14,103 +14,107 @@ import numpy as np
 import pandas as pd
 
 
-def load_experiment(experiment_dir):
+def load_experiment(experiment_dir, tech_rep_pattern=None, validate=True):
     """
-    Read all CSVs and TXTs under the experiment folder using DIRECTORY TOPOLOGY.
-    Filenames are never parsed for metadata.
+    Read all CSVs and TXTs under the experiment folder and derive class + CV-group
+    topology with a flexible, **bottom-up relative-depth** rule (see grouping.py).
+    Both common layouts are accommodated without forcing a single folder shape.
 
-    Topology rule (filename-agnostic)
-    ----------------------------------
-    * Any sub-folder that DIRECTLY contains raw data files is one biological
-      sample / condition. The folder's own name is the sample id.
-    * That folder's PARENT directory name is the class label (``y_labels``).
-      If a sample folder sits directly inside ``experiment_dir`` (legacy 2-level
-      layout) there is no class level above it, so the folder is used as its own
-      class and a warning is printed — grouped CV then has only one biological
-      sample per class.
-    * The data files inside a sample folder are technical replicates of that
-      sample. They are sorted alphabetically and assigned replicate indices
-      1, 2, 3 ...  No part of the filename is inspected to decide this.
+    Layouts (relative to ``experiment_dir``)
+    -----------------------------------------
+    * **Nested** ``<...>/<condition>/<biological_replicate>/file`` (≥2 dir levels):
+      the file's immediate parent folder is the biological replicate (CV group);
+      everything above it is joined to form the class label. Files in that folder
+      are technical replicates and stay grouped.
+    * **Flat** ``<condition>/file`` (exactly 1 dir level): the folder is the class;
+      the biological replicate is recovered from the filename prefix by stripping a
+      trailing technical-replicate token (default ``T<number>``, e.g. ``A1T3``), so
+      ``S5_Green_A1T{1,2,3}.csv`` collapse to replicate ``S5_Green_A1``.
 
-    All samples are interpolated onto a common m/z axis.
+    Class labels and CV groups are produced by ``grouping.parse_sample`` /
+    ``grouping.make_groups`` so the two are always consistent. With ``validate=True``
+    (default) a strict pre-flight check runs after parsing and RAISES (listing the
+    offending folders) if any class has fewer than two biological groups — no silent
+    warn-and-continue.
+
+    Parameters
+    ----------
+    experiment_dir : str
+    tech_rep_pattern : None | str | compiled regex
+        Trailing technical-replicate token for the flat-layout prefix rule.
+    validate : bool
+        Run the ≥2-groups-per-class pre-flight check and raise on failure.
 
     Returns
     -------
     X      : ndarray (n_samples, n_features)
-    labels : ndarray (n_samples,)   — class label per sample (parent folder)
+    labels : ndarray (n_samples,)   — class label per sample (topology-derived)
     names  : list[str]              — each file's path RELATIVE to
-             ``experiment_dir`` in POSIX form (e.g. 'Amber/colony_A/inj_03.csv').
-             This carries the sample+class topology so make_groups() can rebuild
-             leak-free CV groups from the directory structure alone.
+             ``experiment_dir`` in POSIX form. Carries the sample+class topology
+             so make_groups() rebuilds the identical leak-free CV groups.
     mz     : ndarray (n_features,)  — the common m/z axis
     """
+    # Local import keeps grouping a single source of truth for the topology rule
+    # and avoids any import-order coupling at module load time.
+    from shared.grouping import parse_sample, make_groups, check_batch_confound
+
     experiment_dir = os.path.abspath(experiment_dir)
     samples, labels, names = [], [], []
     raw_mz_list = []
 
-    # 1. Discover every folder that DIRECTLY contains data files. Each such
-    #    folder is one biological sample. Walk deterministically and skip
-    #    hidden directories (e.g. .git, .ipynb_checkpoints).
-    sample_dirs = []
+    # 1. Discover every data file anywhere under the experiment dir (any depth),
+    #    walking deterministically and skipping hidden dirs (.git, .ipynb_checkpoints).
+    discovered = []
     for dirpath, dirnames, filenames in os.walk(experiment_dir):
         dirnames[:] = sorted(d for d in dirnames if not d.startswith('.'))
-        if os.path.abspath(dirpath) == experiment_dir:
-            continue  # the root itself is not a sample folder
-        data_files = sorted(
-            f for f in filenames
-            if f.lower().endswith(('.csv', '.txt')) and not f.startswith('.')
-        )
-        if data_files:
-            sample_dirs.append((dirpath, data_files))
-    sample_dirs.sort(key=lambda t: t[0])
+        for fname in sorted(filenames):
+            if fname.lower().endswith(('.csv', '.txt')) and not fname.startswith('.'):
+                file_path = os.path.join(dirpath, fname)
+                rel = os.path.relpath(file_path, experiment_dir).replace(os.sep, '/')
+                discovered.append((rel, file_path))
+    discovered.sort(key=lambda t: t[0])
 
-    if not sample_dirs:
+    if not discovered:
         raise ValueError(
-            f"No .csv/.txt data files found in any sub-folder of {experiment_dir!r}."
+            f"No .csv/.txt data files found anywhere under {experiment_dir!r}."
         )
 
-    for dirpath, data_files in sample_dirs:
-        dirpath_norm = dirpath.rstrip(os.sep)
-        sample_id    = os.path.basename(dirpath_norm)            # leaf folder
-        parent       = os.path.dirname(dirpath_norm)             # one level up
+    for rel, file_path in discovered:
+        # Topology -> class label (raises for a bare filename with no condition dir).
+        class_label, _group_id, _source = parse_sample(rel, tech_rep_pattern)
 
-        if os.path.abspath(parent) == experiment_dir:
-            # 2-level layout: no class folder above the sample folder.
-            class_label = sample_id
-            print(f"  [warning] '{sample_id}' sits directly under the experiment "
-                  f"root, so it is treated as BOTH the class and its only "
-                  f"biological sample. Grouped cross-validation needs >= 2 "
-                  f"samples per class — nest sample folders one level deeper "
-                  f"(experiment/<condition>/<sample>/files) for leak-free CV.")
-        else:
-            class_label = os.path.basename(parent)
+        fname = os.path.basename(file_path)
+        sep = '\t' if fname.lower().endswith('.txt') else ','
+        df = pd.read_csv(file_path, sep=sep, encoding='utf-8-sig')
+        df.columns = df.columns.str.lstrip('﻿').str.strip()
+        col_map = {c.lower(): c for c in df.columns}
+        mz_col  = col_map.get('mz')  or col_map.get('mass/charge')
+        int_col = col_map.get('int') or col_map.get('intensity')
 
-        # Files sorted alphabetically => technical replicates 1, 2, 3 ...
-        for rep_idx, fname in enumerate(data_files, start=1):
-            file_path = os.path.join(dirpath, fname)
-            sep = '\t' if fname.lower().endswith('.txt') else ','
-            df = pd.read_csv(file_path, sep=sep, encoding='utf-8-sig')
-            df.columns = df.columns.str.lstrip('﻿').str.strip()
-            col_map = {c.lower(): c for c in df.columns}
-            mz_col  = col_map.get('mz')  or col_map.get('mass/charge')
-            int_col = col_map.get('int') or col_map.get('intensity')
+        if mz_col is None or int_col is None:
+            print(f"  [warning] Skipping {rel}: could not find m/z or "
+                  f"intensity columns. Found: {list(df.columns)}")
+            continue
 
-            if mz_col is None or int_col is None:
-                print(f"  [warning] Skipping {fname}: could not find m/z or "
-                      f"intensity columns. Found: {list(df.columns)}")
-                continue
-
-            raw_mz_list.append(df[mz_col].values)
-            samples.append(df[int_col].values)
-            labels.append(class_label.strip())
-            # Relative POSIX path = the topology carrier consumed by make_groups.
-            rel = os.path.relpath(file_path, experiment_dir).replace(os.sep, '/')
-            names.append(rel)
+        raw_mz_list.append(df[mz_col].values)
+        samples.append(df[int_col].values)
+        labels.append(class_label.strip())
+        names.append(rel)
 
     if not raw_mz_list:
         raise ValueError(
             "No readable spectra: every file was missing m/z / intensity columns."
         )
+
+    # Fail-fast pre-flight: rebuild the groups now and validate (raises loudly if
+    # any class has < 2 biological groups), so problems surface here, not deep in
+    # StratifiedGroupKFold. Same call run_analysis makes later -> identical groups.
+    if validate:
+        _groups = make_groups(np.array(labels), names,
+                              tech_rep_pattern=tech_rep_pattern, validate=True)
+        # B4: non-fatal advisory — flag single-replicate dominance / thin
+        # replication that grouped CV cannot detect on its own.
+        check_batch_confound(np.array(labels), _groups, names=names)
 
     # 2. Build a common m/z axis covering the overlap range across all files.
     mz_min = max(mz.min() for mz in raw_mz_list)
@@ -234,6 +238,15 @@ def filter_snr_floor(X, mz, y_labels, snr_threshold=3, noise_quantile=60, min_fr
     """
     Remove bins whose signal never exceeds the per-sample baseline noise in any
     condition group.  Applied on RAW binned intensities, BEFORE normalization.
+
+    ROUTING (A2): this is a label/group-aware (supervised) filter and is intended
+    as a DESCRIPTIVE-ONLY characterisation step. Apply it to the descriptive copy
+    of the data (the matrix used for full-data PLS-DA / VIP / the ensemble feature
+    list) — NOT to the matrix that feeds cross-validation. Inside the grouped CV,
+    leave it out by default (config.SNR_FLOOR_IN_CV = False); the per-fold
+    SNRFloor transformer in make_preprocessor exists only for the opt-in case and,
+    when enabled, is fit on the training fold only. Feeding an SNR-floored matrix
+    straight into CV would select features using held-out labels (leakage).
 
     Per-sample robust noise
     -----------------------

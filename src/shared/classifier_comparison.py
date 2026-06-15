@@ -1,4 +1,3 @@
-import os
 """
 Classifier Comparison for Mass Spectrometry Metabolomics Data — R-comparable path
 ==================================================================================
@@ -21,6 +20,7 @@ Classifiers: Random Forest, SVM (linear), Gradient Boosting,
              Logistic Regression, LDA, Ridge.
 """
 
+import os
 import warnings
 
 import numpy as np
@@ -580,6 +580,17 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     _enabled = enabled_methods_from_config(_cfg_fi)
     _imp_by_method = {'rf': rf_imp, 'svm': svm_imp, 'gb': gb_imp,
                       'lr': lr_imp, 'ridge': ridge_imp, 'vip': vip_imp}
+
+    # -- B1: method x method Spearman importance-correlation matrix ---------------
+    # Saved next to the candidate table for a supplementary redundancy heat map.
+    from src.shared.feature_stats import importance_correlation_matrix
+    _active = [m for m in ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip'] if m in _enabled]
+    _corr_df = importance_correlation_matrix(
+        {m: _imp_by_method[m] for m in _active}, method='spearman')
+    _corr_path = os.path.join(out_dir, f'model_importance_correlation_{safe_name}.csv')
+    _corr_df.to_csv(_corr_path, encoding='utf-8')
+    print(f"  Saved model-importance Spearman matrix -> {_corr_path}")
+
     _tops_by_method = {m: set(np.argsort(im)[::-1][:top_n])
                        for m, im in _imp_by_method.items()}
     tops = [_tops_by_method[m] for m in ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']]

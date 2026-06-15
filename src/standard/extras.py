@@ -34,7 +34,6 @@ from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import accuracy_score
 
 import config
@@ -49,7 +48,7 @@ from shared.classifier_comparison_standard import (
     feature_importance_analysis,
     make_preprocessor, auto_n_splits,
 )
-from shared.grouping import make_groups
+from shared.grouping import make_groups, permute_labels_by_group
 
 BASE_DIR = _ROOT
 
@@ -69,10 +68,9 @@ def _load_and_preprocess(experiment_name):
     mz_cv      : m/z aligned with X_cv
     sample_names : filename per sample (for colony grouping)
     """
-    experiment_dir = os.path.join(BASE_DIR, 'data', experiment_name)
-    assert os.path.isdir(experiment_dir), (
-        f"Experiment folder not found: {experiment_dir!r}"
-    )
+    from shared.runtime import resolve_experiment_dir
+    experiment_dir, experiment_name, _ = resolve_experiment_dir(
+        BASE_DIR, experiment_name)
 
     X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir)
     X_binned, mz = bin_features(X_raw, mz, bin_width=config.BIN_WIDTH)
@@ -435,8 +433,18 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     globally preprocessed `X` — so normalisation/transform/scaling/feature
     selection are re-fit on each training fold and never see the held-out fold.
     Technical replicates of a colony are kept together, so the observed accuracy
-    is not inflated by replicate memorisation. The label shuffle happens OUTSIDE
-    the pipeline, regenerating an honest null for the full procedure.
+    is not inflated by replicate memorisation.
+
+    Group-level permutation (A1)
+    ----------------------------
+    The null shuffles class labels at the GROUP (colony) level via
+    ``permute_labels_by_group`` — every colony keeps a single label so its
+    technical replicates always move together, and the number of colonies per
+    class is preserved. Permuting at the sample level would scatter a colony's
+    replicates across classes, break the (groups <-> labels) correspondence used
+    by StratifiedGroupKFold, and destroy the within-colony correlation the null is
+    meant to retain. The shuffle happens OUTSIDE the pipeline so each permutation
+    re-runs the full grouped, leak-free procedure.
 
     Uses Random Forest as the reference classifier.
     """
@@ -452,7 +460,10 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
         scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
         abundance_percentile=config.ABUNDANCE_PERCENTILE,
         prevalence_threshold=config.PREVALENCE_THRESHOLD,
-        snr_floor_enabled=config.SNR_FLOOR_ENABLED,
+        # A2: SNR floor is descriptive-only — keep it OUT of the CV folds unless
+        # SNR_FLOOR_IN_CV is explicitly enabled (default False).
+        snr_floor_enabled=(config.SNR_FLOOR_ENABLED
+                           and getattr(config, 'SNR_FLOOR_IN_CV', False)),
         snr_threshold=config.SNR_THRESHOLD,
         noise_quantile=config.NOISE_QUANTILE,
         min_fraction_in_group=config.MIN_FRACTION_IN_GROUP,
@@ -470,7 +481,9 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     rng = np.random.default_rng(random_state)
     perm_scores = []
     for i in range(n_permutations):
-        y_perm = rng.permutation(y_labels)
+        # Permute labels at the colony level so technical replicates are never
+        # scrambled independently and each group stays single-class.
+        y_perm = permute_labels_by_group(y_labels, groups, rng)
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
@@ -516,7 +529,9 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
 # -- Main ------------------------------------------------------------------------
 
 def main():
-    experiment_name = config.EXPERIMENT.strip()
+    from shared.runtime import resolve_experiment_dir
+    _exp_dir, experiment_name, _ = resolve_experiment_dir(BASE_DIR, config.EXPERIMENT)
+    experiment_name = experiment_name.strip()
     safe_name = experiment_name.replace(' ', '_').replace(':', '')
 
     # -- Output directory --------------------------------------------------------
@@ -535,7 +550,10 @@ def main():
         scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
         abundance_percentile=config.ABUNDANCE_PERCENTILE,
         prevalence_threshold=config.PREVALENCE_THRESHOLD,
-        snr_floor_enabled=config.SNR_FLOOR_ENABLED,
+        # A2: SNR floor is descriptive-only — keep it OUT of the CV folds unless
+        # SNR_FLOOR_IN_CV is explicitly enabled (default False).
+        snr_floor_enabled=(config.SNR_FLOOR_ENABLED
+                           and getattr(config, 'SNR_FLOOR_IN_CV', False)),
         snr_threshold=config.SNR_THRESHOLD, noise_quantile=config.NOISE_QUANTILE,
         min_fraction_in_group=config.MIN_FRACTION_IN_GROUP,
     )

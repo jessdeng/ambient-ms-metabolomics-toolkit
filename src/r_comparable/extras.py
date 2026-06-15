@@ -44,7 +44,7 @@ from shared.classifier_comparison import (
     feature_importance_analysis,
     make_preprocessor, auto_n_splits,
 )
-from shared.grouping import make_groups
+from shared.grouping import make_groups, permute_labels_by_group
 
 # ── Per-pipeline default resolution ──────────────────────────────────────────
 _json_keys     = getattr(config, '_json_keys', set())
@@ -65,10 +65,9 @@ OUT_DIR  = os.path.join(BASE_DIR, 'results', 'r_comparable')
 
 def _load_and_preprocess(experiment_name):
     """Load, filter, and preprocess using r_comparable pipeline."""
-    experiment_dir = os.path.join(BASE_DIR, 'data', experiment_name)
-    assert os.path.isdir(experiment_dir), (
-        f"Experiment folder not found: {experiment_dir!r}"
-    )
+    from shared.runtime import resolve_experiment_dir
+    experiment_dir, experiment_name, _ = resolve_experiment_dir(
+        BASE_DIR, experiment_name)
 
     X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir)
 
@@ -106,7 +105,14 @@ def _load_and_preprocess(experiment_name):
 
 def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
                          n_permutations=100, random_state=None):
-    """GroupKFold permutation test using r_comparable classifier."""
+    """GroupKFold permutation test using the r_comparable classifier.
+
+    Mirrors standard/extras.py: the whole preprocessing + model pipeline runs
+    inside StratifiedGroupKFold keyed on the biological colony, and the null
+    permutes class labels at the GROUP (colony) level via
+    ``permute_labels_by_group`` so technical replicates are never scrambled
+    independently and each group stays single-class under the null.
+    """
     import warnings
     if random_state is None:
         random_state = config.RANDOM_SEED
@@ -135,7 +141,9 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     rng = np.random.default_rng(random_state)
     perm_accs = []
     for i in range(n_permutations):
-        y_perm = rng.permutation(y_labels)
+        # Permute labels at the colony level so technical replicates are never
+        # scrambled independently and each group stays single-class.
+        y_perm = permute_labels_by_group(y_labels, groups, rng)
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
@@ -182,7 +190,9 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    experiment_name = config.EXPERIMENT.strip()
+    from shared.runtime import resolve_experiment_dir
+    _exp_dir, experiment_name, _ = resolve_experiment_dir(BASE_DIR, config.EXPERIMENT)
+    experiment_name = experiment_name.strip()
     safe_name       = experiment_name.replace(' ', '_').replace(':', '')
 
     print(f"\nExtras (R-comparable) -- {experiment_name}")

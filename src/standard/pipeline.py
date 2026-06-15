@@ -29,8 +29,8 @@ apply_style()
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold
-from sklearn.metrics import accuracy_score
 from standard.preprocessing import load_experiment, bin_features, filter_low_variance, filter_low_abundance, preprocess
+from shared.grouping import permute_labels_by_group
 
 # -- Configuration ---------------------------------------------------------------
 N_COMPONENTS = 8   # number of PLS-DA components for scores plot and cross-validation
@@ -52,49 +52,57 @@ def fit_plsda(X, y_labels, n_components):
     return pls, T, y, Y, le.classes_
 
 
-def cross_validate(X, y, n_components, n_splits=5, random_state=42):
-    """Stratified k-fold cross-validation. Returns per-fold accuracies."""
-    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    fold_accs = []
-
-    for fold, (train_idx, test_idx) in enumerate(cv.split(X, y)):
-        X_tr, X_te = X[train_idx], X[test_idx]
-        y_tr, y_te = y[train_idx], y[test_idx]
-
-        Y_tr = OneHotEncoder(sparse_output=False).fit_transform(y_tr.reshape(-1, 1))
-        model = PLSRegression(n_components=n_components, scale=False)
-        model.fit(X_tr, Y_tr)
-
-        y_pred = model.predict(X_te).argmax(axis=1)
-        acc = accuracy_score(y_te, y_pred)
-        fold_accs.append(acc)
-        print(f"    Fold {fold + 1}: {acc:.3f}")
-
-    return np.array(fold_accs)
-
-
-def compute_vip_1comp(X, y_labels):
+def compute_vip(X, y_labels, n_components=1):
     """
-    Compute VIP scores using only 1 PLS-DA component.
-    This matches MetaboAnalyst's component 1 VIP exactly.
+    VIP scores aggregated across the first ``n_components`` PLS-DA latent variables.
+
+    The standard VIP formula sums each feature's squared, length-normalised weight
+    over the retained components, weighted by the Y-variance each component
+    explains (SS_a = ||t_a||^2 * ||q_a||^2):
+
+        VIP_j = sqrt( p * sum_a (w_aj/||w_a||)^2 * SS_a / sum_a SS_a )
+
+    Component asymmetry (intentional — NOT a bug)
+    ---------------------------------------------
+    ``n_components=1`` (the default) reproduces MetaboAnalyst's component-1 VIP
+    exactly, which is why the toolkit defaults to it for cross-tool parity even
+    though the 3-D scores plot is drawn with ``config.N_PLSDA_COMPONENTS`` (8)
+    latent variables. The two serve different purposes: the scores plot visualises
+    the leading multivariate structure, while the 1-LV VIP is the MetaboAnalyst-
+    comparable feature ranking. Set ``config.PLSDA_VIP_NUM_COMPONENTS`` (passed
+    here) > 1 to aggregate VIP over more components and match the plot dimensions;
+    the value used is logged by run_analysis so an independent researcher does not
+    mistake the 1-vs-8 asymmetry for an error.
     """
     le = LabelEncoder()
     y  = le.fit_transform(y_labels)
     Y  = OneHotEncoder(sparse_output=False).fit_transform(y.reshape(-1, 1))
 
-    pls = PLSRegression(n_components=1, scale=False)
+    # Clamp to a feasible rank (can't exceed features or n_samples-1).
+    A = int(max(1, min(n_components, X.shape[1], X.shape[0] - 1)))
+    pls = PLSRegression(n_components=A, scale=False)
     pls.fit(X, Y)
 
-    T = pls.x_scores_       # (n_samples, 1)
-    W = pls.x_weights_      # (n_features, 1)
-    Q = pls.y_loadings_     # (n_groups, 1)
+    T = pls.x_scores_       # (n_samples, A)
+    W = pls.x_weights_      # (n_features, A)
+    Q = pls.y_loadings_     # (n_groups,  A)
 
     n_features = X.shape[1]
-    SS     = np.sum(T ** 2, axis=0) * np.sum(Q ** 2, axis=0)
+    SS     = np.sum(T ** 2, axis=0) * np.sum(Q ** 2, axis=0)   # (A,)
     W_norm = W / np.sqrt(np.sum(W ** 2, axis=0))
     vip    = np.sqrt(n_features * (W_norm ** 2 @ SS) / SS.sum())
 
     return vip
+
+
+def compute_vip_1comp(X, y_labels):
+    """1-component VIP — exact MetaboAnalyst component-1 parity.
+
+    Thin wrapper around ``compute_vip(..., n_components=1)``. This is the canonical
+    VIP used inside the ensemble consensus / bootstrap / permutation null so that
+    layer stays MetaboAnalyst-comparable regardless of the plotting components.
+    """
+    return compute_vip(X, y_labels, n_components=1)
 
 
 def compute_plsda_q2(X, y_labels, n_components, groups=None, n_splits=5,
@@ -137,27 +145,75 @@ def compute_plsda_q2(X, y_labels, n_components, groups=None, n_splits=5,
     return 1.0 - press / tss if tss > 0 else np.nan
 
 
+def compute_plsda_r2y(X, y_labels, n_components):
+    """Apparent (goodness-of-fit) cumulative R^2Y for PLS-DA.
+
+    R^2Y = 1 - SS(Y - Y_hat) / SS(Y - mean(Y)) for the model fit on ALL data, on
+    the one-hot response — the fraction of Y variance the components explain. It is
+    the in-sample complement to the cross-validated Q^2: a large R^2Y with a small
+    Q^2 signals overfitting, so the two are reported together.
+    """
+    le = LabelEncoder()
+    y  = le.fit_transform(y_labels)
+    Y  = OneHotEncoder(sparse_output=False).fit_transform(y.reshape(-1, 1))
+    A  = int(max(1, min(n_components, X.shape[1], X.shape[0] - 1)))
+    pls = PLSRegression(n_components=A, scale=False)
+    pls.fit(X, Y)
+    Y_hat = pls.predict(X)
+    ss_res = np.sum((Y - Y_hat) ** 2)
+    ss_tot = np.sum((Y - Y.mean(axis=0)) ** 2)
+    return 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+
+
 def evaluate_plsda_q2(X, y_labels, n_components, groups=None, n_splits=5,
                       n_perm=200, random_state=42):
-    """Observed Q^2 plus a label-permutation null and its empirical p-value.
+    """PLS-DA model quality: observed R^2Y and Q^2 + a permutation null for BOTH.
 
-    Returns (q2_observed, null_q2_array, p_value). The p-value uses the
-    +1/+1 estimator (Phipson & Smyth 2010): p = (#{null >= obs} + 1)/(n + 1).
+    Returns a dict::
+
+        {'r2y', 'q2',                      # observed apparent fit & CV predictivity
+         'r2y_null', 'q2_null',            # (n_perm,) permuted statistics
+         'r2y_p', 'q2_p',                  # empirical +1/+1 p-values (Phipson &
+                                           #   Smyth 2010): (#{null>=obs}+1)/(n+1)
+         'n_perm_valid'}
+
+    Both R^2Y (in-sample fit) and Q^2 (cross-validated predictivity) are tracked
+    so referees see goodness-of-fit and generalisation side by side, each with its
+    own calibrated permutation p-value. When ``groups`` is given, labels are
+    permuted at the GROUP (colony) level via ``permute_labels_by_group`` so
+    technical replicates are never scrambled independently and the grouped Q^2
+    folds stay well-defined under the null; otherwise a plain sample-level shuffle
+    is used.
     """
-    q2_obs = compute_plsda_q2(X, y_labels, n_components, groups=groups,
-                              n_splits=n_splits, random_state=random_state)
+    r2y_obs = compute_plsda_r2y(X, y_labels, n_components)
+    q2_obs  = compute_plsda_q2(X, y_labels, n_components, groups=groups,
+                               n_splits=n_splits, random_state=random_state)
     rng  = np.random.default_rng(random_state)
-    null = np.empty(n_perm, dtype=float)
+    r2y_null = np.empty(n_perm, dtype=float)
+    q2_null  = np.empty(n_perm, dtype=float)
     y_arr = np.asarray(y_labels)
     for i in range(n_perm):
-        yp = rng.permutation(y_arr)
-        null[i] = compute_plsda_q2(X, yp, n_components, groups=groups,
-                                   n_splits=n_splits,
-                                   random_state=random_state + i + 1)
-    valid = null[np.isfinite(null)]
-    p_value = ((np.sum(valid >= q2_obs) + 1.0) / (valid.size + 1.0)
-               if valid.size else np.nan)
-    return q2_obs, null, p_value
+        if groups is not None:
+            yp = permute_labels_by_group(y_arr, groups, rng)
+        else:
+            yp = rng.permutation(y_arr)
+        r2y_null[i] = compute_plsda_r2y(X, yp, n_components)
+        q2_null[i]  = compute_plsda_q2(X, yp, n_components, groups=groups,
+                                       n_splits=n_splits,
+                                       random_state=random_state + i + 1)
+
+    def _emp_p(obs, null):
+        valid = null[np.isfinite(null)]
+        return (((np.sum(valid >= obs) + 1.0) / (valid.size + 1.0))
+                if valid.size else np.nan)
+
+    return {
+        'r2y': r2y_obs, 'q2': q2_obs,
+        'r2y_null': r2y_null, 'q2_null': q2_null,
+        'r2y_p': _emp_p(r2y_obs, r2y_null),
+        'q2_p':  _emp_p(q2_obs, q2_null),
+        'n_perm_valid': int(np.isfinite(q2_null).sum()),
+    }
 
 
 def plot_scores_3d(T, pls, y_labels, classes, experiment_name, out_path):

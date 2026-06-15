@@ -23,9 +23,17 @@ import json as _json
 RANDOM_SEED = 42
 
 # ── Experiment ─────────────────────────────────────────────────────────────────
-# The name of your experiment folder. Must be in the same directory as the
-# .py files. Include spaces and special characters exactly as they appear.
+# The name of your experiment folder inside data/. Include spaces/special
+# characters exactly as they appear.
+#
+# Out-of-the-box safety (C-3): if this is left as the placeholder below, or points
+# at a folder with no .csv/.txt data, run_analysis does NOT crash — it falls back
+# to the bundled sample experiment (SAMPLE_EXPERIMENT) and prints a warning, so a
+# fresh clone runs end-to-end. Set this to your own folder to analyse real data.
 EXPERIMENT = 'your_experiment_folder'   # folder name inside data/
+
+# Bundled demo dataset used as the fallback when EXPERIMENT is unset/missing.
+SAMPLE_EXPERIMENT = 'sample_experiment'
 
 
 # ── m/z Range ──────────────────────────────────────────────────────────────────
@@ -77,6 +85,15 @@ SNR_FLOOR_ENABLED      = True   # standard default; r_comparable defaults False
 SNR_THRESHOLD          = 3      # minimum SNR to count a sample as detected
 NOISE_QUANTILE         = 60     # percentile used to identify the noise region
 MIN_FRACTION_IN_GROUP  = 0.5    # min fraction of group samples that must pass
+
+# A2 — SNR-floor routing. The SNR floor is label/group-aware (supervised), so by
+# default it is a DESCRIPTIVE-ONLY filter: it is applied to the full-data copy
+# used for PLS-DA / VIP / the ensemble feature list, and is NOT a step inside the
+# cross-validation folds (so it never dynamically alters the per-fold feature
+# space). Set this True only if you deliberately want the SNR floor re-fit per
+# training fold inside the CV pipeline (still leak-free, but reintroduces per-fold
+# feature-set asymmetry). Reported CV accuracies use SNR_FLOOR_IN_CV = False.
+SNR_FLOOR_IN_CV        = False
 
 
 # ── Normalization ──────────────────────────────────────────────────────────────
@@ -174,6 +191,14 @@ N_PLSDA_COMPONENTS = 8
 # How many top VIP features to show in the dot plot and heatmap.
 N_TOP_VIP = 30
 
+# Number of PLS-DA latent variables the VIP score aggregates over.
+# Default 1 = exact MetaboAnalyst component-1 parity (this is why VIP uses 1 LV
+# while the 3-D scores plot uses N_PLSDA_COMPONENTS=8 — an intentional asymmetry,
+# NOT a bug). Set to N_PLSDA_COMPONENTS to make the VIP ranking aggregate over the
+# same latent space the scores plot visualises. The ensemble/bootstrap/null VIP
+# always stays at 1 LV for MetaboAnalyst-comparable consensus.
+PLSDA_VIP_NUM_COMPONENTS = 1
+
 
 # ── Classifiers ────────────────────────────────────────────────────────────────
 # Set to True to include a classifier, False to skip it.
@@ -206,6 +231,13 @@ N_CV_REPEATS = 10
 # Benjamini-Hochberg FDR q-values are always reported next to the raw p-values.
 UNIVARIATE_TEST = 'auto'
 
+# Replicate handling for the univariate test. True (default) averages each feature
+# within its biological group (colony) BEFORE testing, so technical replicates are
+# not pseudoreplicated and n = colonies per class (consistent with the grouped CV).
+# Set False to test at the raw per-spectrum level (anti-conservative; for comparison
+# only). The chosen unit is recorded in the table's 'univariate_test' column.
+UNIVARIATE_GROUP_AGGREGATE = True
+
 # ── Feature-selection stability (bootstrap) ───────────────────────────────────────
 # Resamples colonies with replacement, re-fits the ensemble, and reports how
 # often each feature is selected — out-of-sample evidence the candidate list is
@@ -237,6 +269,14 @@ N_JOBS = -1
 # How many top features to take from each method when looking for overlap.
 # Features appearing in at least 2 of the 5 interpretable methods are reported.
 TOP_N_FEATURES = 50
+
+# ── Permutation importance (B2 — counters tree impurity bias) ──────────────────
+# Computes sklearn.inspection.permutation_importance for RF and GB on the HELD-OUT
+# CV folds (grouped by colony), a model-agnostic alternative to impurity-based
+# feature_importances_. Saved to permutation_importance_<exp>.csv and merged into
+# the candidate table by m/z. Set False to skip (saves a little time).
+RUN_PERMUTATION_IMPORTANCE = True
+N_PERM_IMPORTANCE_REPEATS  = 5    # permutation repeats inside permutation_importance
 
 
 # ── Extras ─────────────────────────────────────────────────────────────────────

@@ -12,8 +12,10 @@ Usage:
 # All functions are identical to standard/pipeline.py — re-export directly.
 from standard.pipeline import (
     fit_plsda,
+    compute_vip,
     compute_vip_1comp,
     compute_plsda_q2,
+    compute_plsda_r2y,
     evaluate_plsda_q2,
     plot_scores_3d,
     plot_vip,

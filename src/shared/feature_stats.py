@@ -75,7 +75,8 @@ def _to_linear(mu, log_transform):
     return mu  # 'none'
 
 
-def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'):
+def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto',
+                             groups=None, aggregate_within_group=True):
     """Per-feature fold-change, univariate p-value, and BH-FDR q-value.
 
     Parameters
@@ -94,18 +95,62 @@ def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'
         'auto'    -> Welch's t (2 groups) / one-way ANOVA (>2 groups)
         'ttest'   -> same as auto (parametric)
         'wilcoxon'-> Wilcoxon rank-sum (2 groups) / Kruskal-Wallis (>2 groups)
+    groups : array-like (n_samples,) or None
+        Biological-replicate (colony) CV group per sample, as built by
+        ``make_groups``. Used only for replicate-aware aggregation (below).
+    aggregate_within_group : bool
+        Replicate handling — IMPORTANT for pseudoreplicated designs.
+
+    Replicate handling (pseudoreplication)
+    --------------------------------------
+    Technical replicates are NOT independent observations, so testing one spectrum
+    per replicate inflates the effective sample size and deflates p-values. When
+    ``groups`` is given and ``aggregate_within_group`` is True (default), every
+    feature is first AVERAGED within each biological group, so the test sees ONE
+    value per colony (n = colonies per class), exactly the unit used by the grouped
+    cross-validation. This is the statistically honest test for this design. The
+    fold-change is computed from the same colony-level means.
+
+    Set ``aggregate_within_group=False`` (or pass ``groups=None``) to test at the
+    raw per-spectrum level (n = spectra) — anti-conservative here, retained only
+    for backward compatibility / comparison. The chosen unit is recorded in the
+    returned ``test_name`` and ``aggregated`` / ``n_units_per_class`` fields.
 
     Returns
     -------
     dict with arrays of length n_features:
         p_value, q_value, log2_fold_change, fold_change, neg_log10_q,
-        top_group, bottom_group  (+ scalar 'test_name')
+        top_group, bottom_group  (+ scalars 'test_name', 'aggregated',
+        'n_units_per_class')
     """
     X_log = np.asarray(X_log, dtype=float)
     y = np.asarray(y_labels)
+
+    # --- replicate-aware aggregation: collapse to one row per biological group ---
+    aggregated = False
+    if groups is not None and aggregate_within_group:
+        groups = np.asarray(groups)
+        uniq_groups = np.unique(groups)
+        rows, glab = [], []
+        for g in uniq_groups:
+            m = (groups == g)
+            labs = set(y[m])
+            if len(labs) != 1:
+                raise ValueError(
+                    f"Group {g!r} spans multiple classes {sorted(labs)}; cannot "
+                    "aggregate technical replicates for the univariate test. "
+                    "Rebuild groups with make_groups() so each group is one class."
+                )
+            rows.append(X_log[m].mean(axis=0))   # mean spectrum of this colony
+            glab.append(next(iter(labs)))
+        X_log = np.vstack(rows)
+        y = np.asarray(glab)
+        aggregated = True
+
     classes = np.unique(y)
     n_features = X_log.shape[1]
     group_idx = [np.where(y == c)[0] for c in classes]
+    n_units_per_class = {str(c): int(len(idx)) for c, idx in zip(classes, group_idx)}
     parametric = test in ('auto', 'ttest')
 
     # --- group means on the linear axis -> fold change --------------------------
@@ -156,6 +201,10 @@ def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'
                     p[j] = np.nan
             test_name = "Kruskal-Wallis"
 
+    # Record the testing unit so the candidate table is self-documenting.
+    test_name = test_name + (" (colony-aggregated)" if aggregated
+                             else " (per-spectrum)")
+
     p = np.where(np.isfinite(p), p, 1.0)
     q = benjamini_hochberg(p)
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -172,6 +221,8 @@ def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'
         'top_group': top_group,
         'bottom_group': bottom_group,
         'test_name': test_name,
+        'aggregated': aggregated,
+        'n_units_per_class': n_units_per_class,
     }
 
 
@@ -440,6 +491,51 @@ def enabled_methods_from_config(cfg):
     if getattr(cfg, 'USE_RIDGE', True):               s.add('ridge')
     s.add('vip')
     return s
+
+
+def importance_correlation_matrix(imp_by_method, method='spearman'):
+    """Pairwise rank-correlation matrix across model importance vectors (B1).
+
+    Quantifies how redundant the ensemble's rankings are. Four of the six methods
+    (SVM-linear, LogReg, Ridge, PLS-DA VIP) are linear discriminants on the same
+    autoscaled matrix and tend to co-rank features; RF and GB share a tree
+    inductive bias. A high off-diagonal correlation therefore means the
+    "top-N in >= k of 6 methods" consensus is NOT k independent votes — exactly
+    the redundancy a referee will ask to see made explicit.
+
+    Parameters
+    ----------
+    imp_by_method : dict {method_name: importance_array (n_features,)}
+        One full-length importance vector per active estimator. All vectors must
+        share the same length (the descriptive feature axis).
+    method : {'spearman', 'pearson'}
+        'spearman' (default) ranks first — appropriate for comparing importances
+        on different, non-commensurate scales (Gini vs |coef| vs VIP).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Square, symmetric correlation matrix indexed/columned by method name.
+        The diagonal is 1.0; a constant importance vector yields NaN correlations.
+    """
+    import pandas as pd
+
+    names = list(imp_by_method)
+    n = len(names)
+    vecs = [np.asarray(imp_by_method[k], dtype=float) for k in names]
+    M = np.full((n, n), np.nan, dtype=float)
+    for i in range(n):
+        for j in range(i, n):
+            a, b = vecs[i], vecs[j]
+            if method == 'pearson':
+                if a.std() == 0 or b.std() == 0:
+                    rho = np.nan
+                else:
+                    rho = float(np.corrcoef(a, b)[0, 1])
+            else:
+                rho = float(stats.spearmanr(a, b).correlation)
+            M[i, j] = M[j, i] = rho
+    return pd.DataFrame(M, index=names, columns=names)
 
 
 def empirical_p(observed, null_samples):

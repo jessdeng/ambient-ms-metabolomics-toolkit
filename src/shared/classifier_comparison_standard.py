@@ -48,6 +48,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold, cross_validate
 from sklearn.metrics import accuracy_score
+from sklearn.inspection import permutation_importance
 
 from standard.pipeline import compute_vip_1comp
 
@@ -393,6 +394,83 @@ def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits,
     return test_acc, train_acc
 
 
+def grouped_permutation_importance(X_binned, y_labels, groups, prep_steps, mz,
+                                   models=('rf', 'gb'), n_splits=3, n_repeats=1,
+                                   n_perm_repeats=5, scoring='balanced_accuracy',
+                                   random_state=_SEED, n_jobs=-1):
+    """Held-out permutation importance under grouped CV (B2 — counters impurity bias).
+
+    Tree-model ``feature_importances_`` is impurity (Gini/MSE) based and is biased
+    toward high-cardinality and correlated features. This computes a model-agnostic
+    alternative: for each StratifiedGroupKFold fold the FULL leak-free Pipeline
+    (``prep_steps`` + estimator) is fit on the training fold, then
+    ``sklearn.inspection.permutation_importance`` is run on the HELD-OUT fold,
+    scoring the drop in ``scoring`` when each feature is shuffled.
+
+    Grouping & leakage
+    ------------------
+    Folds are colony-level (``StratifiedGroupKFold`` on ``groups``), so a colony's
+    technical replicates are never split between fit and scoring. Permutation acts
+    on the columns of the RAW binned input ``X_binned`` (the Pipeline input), which
+    are identical across folds — so per-fold importances align to ``mz`` and
+    average cleanly — and the shuffle is propagated through the whole per-fold
+    preprocessing chain. Importance is measured on data the model never saw.
+
+    Parameters
+    ----------
+    X_binned : ndarray (n_samples, n_features)
+        RAW mass-range-filtered binned matrix (same matrix fed to the grouped CV).
+    groups : array-like (n_samples,)   colony CV groups from make_groups.
+    prep_steps : list of (name, transformer)  from make_preprocessor (reused as-is,
+        so the SNR/prevalence routing matches the reported CV).
+    mz : ndarray (n_features,)  m/z per column of X_binned (for the output 'mz').
+    models : subset of {'rf', 'gb'}.
+    n_perm_repeats : int  permutation repeats inside permutation_importance.
+
+    Returns
+    -------
+    pandas.DataFrame with 'mz' and, per model, '<m>_perm_importance_mean' and
+    '<m>_perm_importance_std' (mean / std of the per-fold importances).
+    """
+    y = _encode(y_labels)
+    groups = np.asarray(groups)
+    n_features = X_binned.shape[1]
+    est_factory = {
+        'rf': lambda: RandomForestClassifier(n_estimators=100,
+                                             random_state=random_state),
+        'gb': lambda: GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
+                                                 max_depth=3,
+                                                 random_state=random_state),
+    }
+    models = [m for m in models if m in est_factory]
+    fold_imp = {m: [] for m in models}
+
+    for r in range(max(1, n_repeats)):
+        sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
+                                    random_state=random_state + r)
+        for tr, te in sgkf.split(X_binned, y, groups):
+            for m in models:
+                steps = ([(name, clone(t)) for name, t in prep_steps]
+                         + [('clf', est_factory[m]())])
+                pipe = Pipeline(steps)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    pipe.fit(X_binned[tr], y[tr])
+                    pi = permutation_importance(
+                        pipe, X_binned[te], y[te], scoring=scoring,
+                        n_repeats=n_perm_repeats, random_state=random_state + r,
+                        n_jobs=n_jobs)
+                fold_imp[m].append(pi.importances_mean)
+
+    df = pd.DataFrame({'mz': np.asarray(mz)})
+    for m in models:
+        arr = (np.vstack(fold_imp[m]) if fold_imp[m]
+               else np.zeros((1, n_features)))
+        df[f'{m}_perm_importance_mean'] = arr.mean(axis=0)
+        df[f'{m}_perm_importance_std'] = arr.std(axis=0)
+    return df
+
+
 def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=_SEED):
     """Original ungrouped CV on an already-preprocessed X. Leaky -- kept only
     for backward compatibility with callers that have not been updated."""
@@ -596,6 +674,17 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     _enabled = enabled_methods_from_config(_cfg_fi)
     _imp_by_method = {'rf': rf_imp, 'svm': svm_imp, 'gb': gb_imp,
                       'lr': lr_imp, 'ridge': ridge_imp, 'vip': vip_imp}
+
+    # -- B1: method x method Spearman importance-correlation matrix ---------------
+    # Saved next to the candidate table for a supplementary redundancy heat map.
+    from src.shared.feature_stats import importance_correlation_matrix
+    _active = [m for m in ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip'] if m in _enabled]
+    _corr_df = importance_correlation_matrix(
+        {m: _imp_by_method[m] for m in _active}, method='spearman')
+    _corr_path = os.path.join(out_dir, f'model_importance_correlation_{safe_name}.csv')
+    _corr_df.to_csv(_corr_path, encoding='utf-8')
+    print(f"  Saved model-importance Spearman matrix -> {_corr_path}")
+
     _tops_by_method = {m: set(np.argsort(im)[::-1][:top_n])
                        for m, im in _imp_by_method.items()}
     tops = [_tops_by_method[m] for m in ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']]
@@ -734,10 +823,16 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
               f"({n_methods_enabled} methods) via USE_* flags")
 
     # 1. Univariate fold-change + test + BH-FDR (over ALL features, then subset).
+    #    Replicate-aware: when `groups` is available the test is aggregated to the
+    #    biological-replicate (colony) level by default so technical replicates are
+    #    not pseudoreplicated (config.UNIVARIATE_GROUP_AGGREGATE, default True).
     if X_norm is not None:
+        aggregate = getattr(_cfg, 'UNIVARIATE_GROUP_AGGREGATE', True)
         stats = univariate_feature_stats(X_norm, y_labels,
                                          log_transform=log_transform,
-                                         test=univariate_test)
+                                         test=univariate_test,
+                                         groups=groups,
+                                         aggregate_within_group=aggregate)
         overlap_df['fold_change']      = stats['fold_change'][overlap_list]
         overlap_df['log2_fold_change'] = stats['log2_fold_change'][overlap_list]
         overlap_df['p_value']          = stats['p_value'][overlap_list]
@@ -746,8 +841,10 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
         overlap_df['fc_bottom_group']  = stats['bottom_group'][overlap_list]
         overlap_df['univariate_test']  = stats['test_name']
         n_sig = int((stats['q_value'][overlap_list] < 0.05).sum())
+        units = stats.get('n_units_per_class', {})
         print(f"  Univariate {stats['test_name']} + BH-FDR: "
-              f"{n_sig}/{len(overlap_list)} candidates at q < 0.05")
+              f"{n_sig}/{len(overlap_list)} candidates at q < 0.05"
+              + (f"  (n units/class: {units})" if units else ""))
     else:
         print("  [stats] X_norm not provided -- skipping univariate FDR columns")
 
