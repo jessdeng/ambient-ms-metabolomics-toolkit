@@ -6,7 +6,7 @@ Keeps a hard wall between the open-source toolkit and private paper data.
 
   * The synthetic ``data/sample_experiment/`` ships with the repo and IS committed,
     so anyone can run the pipeline out-of-the-box. This script never touches it.
-  * Your real experiments (e.g. 'experiment_a', 'experiment_b', 'experiment_c', 'experiment_d')
+  * Your real experiments (e.g. 'experiment_2024_06', 'pilot_run', 'batch_a')
     live only on your machine. This script symlinks (default) or copies them into
     ``data/`` for local analysis and appends their names to ``.gitignore`` so Git
     can never track or push them.
@@ -236,7 +236,7 @@ def _print_success(root, mapped, newly_ignored, mode, dry_run):
     print('        python -m standard.run_analysis')
     print('  • On your own (private, git-ignored) data:')
     print('        python -m shared.consolidate_data "/path/to/your/data/snapshot"')
-    print('        set  "EXPERIMENT": "experiment_a"  in config.json')
+    print('        set  "EXPERIMENT": "my_experiment"  in config.json')
     print('        python -m standard.run_analysis')
     print('=' * 70 + '\n')
 

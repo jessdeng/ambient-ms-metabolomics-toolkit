@@ -55,11 +55,9 @@ htmlcov/
 *.log
 
 # >>> consolidate_data: local real datasets — DO NOT COMMIT >>>
-# Private experimental data mapped by consolidate_data.py — never commit.
-/data/experiment_c
-/data/experiment_d
-/data/experiment_a
-/data/experiment_b
-# Keep the synthetic demo dataset tracked even if data/* is ignored above:
+# All of data/* is already ignored above, so any private dataset placed under
+# data/ is never committed. consolidate_data.py appends per-dataset entries
+# here on your local machine; do not commit those local edits.
+# Keep the synthetic demo dataset tracked even though data/* is ignored above:
 !/data/sample_experiment/
 # <<< consolidate_data <<<

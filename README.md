@@ -178,7 +178,7 @@ data/
 
 ## Methodological Note
 
-> **Two methodological decisions prevent the most common biases in small-n metabolomics studies. Both are required for defensible peer-review-grade analysis.**
+> **Two methodological decisions prevent the most common biases in small-n metabolomics studies. Both are required for a defensible, reproducible analysis.**
 
 ### 1. Leave-One-Biological-Replicate-Out Cross-Validation (GroupKFold)
 
