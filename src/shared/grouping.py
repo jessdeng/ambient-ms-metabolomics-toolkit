@@ -46,6 +46,7 @@ time instead of letting ``StratifiedGroupKFold`` blow up several steps downstrea
 
 import os
 import re
+import warnings
 import posixpath
 import numpy as np
 
@@ -58,22 +59,83 @@ _TIMESTAMP_RE = re.compile(
     r'(?:[ _T-]?(\d{2})[-_:]?(\d{2})(?:[-_:]?(\d{2}))?)?'   # optional HH MM SS
 )
 
-# Default technical-replicate suffix: a trailing 'T<digits>' token (e.g. 'A1T3'),
-# optionally preceded by a separator. The look-behind requires the 'T' to follow a
-# digit or a separator so ordinary words ending in 'T' + digits (e.g. 'EXTRACT3')
-# are NOT mistaken for a replicate token. Override per call if your naming differs.
-DEFAULT_TECH_REP_RE = re.compile(r'(?<=[0-9_\-. ])[Tt]\d+$')
+# --- Technical-replicate token stripping (flat-layout prefix rule) --------------
+# A biological-replicate id is recovered from a filename by ITERATIVELY removing
+# trailing *technical* tokens: injection index ('_01'), polarity tag ('_NEG'),
+# batch/run/rep markers ('_batch1', '_rep2', '_inj3'), and the classic 'T<n>'
+# suffix ('A1T3'). Stripping is aggressive on purpose so that common mass-spec
+# names such as '7860_8e6_NEG_01' collapse to the true biological id '7860_8e6'
+# (all 10 injections then share ONE group). Every delimited token must be preceded
+# by a separator ('_', '-', '.', or space) so embedded digits — e.g. the '6' in
+# '8e6', or the well number in 'A1' — are never clipped.
+# IMPORTANT — default strips only UNAMBIGUOUSLY TECHNICAL tokens. Words like
+# 'rep', 'replicate', 'batch', 'run', 'sample' are deliberately NOT in the default
+# set: in biology they usually denote the BIOLOGICAL replicate / experimental
+# block, which is exactly the unit grouped CV must KEEP SEPARATE. Stripping them by
+# default would silently collapse a valid 3-biological-replicate design into a fake
+# n=1 study. Users whose 'repN' really is a technical replicate can opt in by
+# passing an explicit tech_rep_pattern= (see module docstring / README).
+_DELIM_TOKEN_RE = re.compile(
+    r'[_\-.\s]+'                                                    # required delimiter
+    r'(?:'
+    r'(?:injection|inj|acq(?:uisition)?|tech(?:nical)?|scan)\.?\d+'  # technical markers
+    r'|neg|pos'                                                     # polarity tag
+    r'|\d+'                                                         # bare injection index
+    r')$',
+    re.IGNORECASE,
+)
+
+# Opt-in extension: pass this as tech_rep_pattern= to ALSO strip rep/replicate/
+# batch/run/sample markers when you know they are technical, not biological.
+AGGRESSIVE_TECH_REP_RE = re.compile(
+    r'[_\-.\s]+'
+    r'(?:(?:rep|replicate|run|batch|sample|injection|inj|acq(?:uisition)?'
+    r'|tech(?:nical)?|scan)\.?\d+|r\d+|b\d+|neg|pos|\d+)$',
+    re.IGNORECASE,
+)
+# 'T<n>' may follow a digit (e.g. 'A1T3') OR a delimiter; handled separately so a
+# well id like 'A1' keeps its trailing digit once the T-token is removed.
+_TREP_TOKEN_RE = re.compile(r'(?<=[0-9_\-.\s])[Tt]\d+$')
+
+# Back-compat alias: callers/tests that import this name still resolve. The new,
+# aggressive multi-token behaviour is the default inside _strip_tech_tokens().
+DEFAULT_TECH_REP_RE = _TREP_TOKEN_RE
 
 _SEP_STRIP = ' _-.'
 
 
 def _compile_pattern(tech_rep_pattern):
-    """Accept None (default), a compiled regex, or a string pattern."""
+    """Accept None (use built-in aggressive set), a compiled regex, or a string."""
     if tech_rep_pattern is None:
-        return DEFAULT_TECH_REP_RE
+        return None
     if isinstance(tech_rep_pattern, str):
         return re.compile(tech_rep_pattern)
     return tech_rep_pattern
+
+
+def _strip_tech_tokens(stem, tech_rep_pattern=None, max_tokens=12):
+    """Strip trailing technical-replicate tokens from a filename stem.
+
+    ``tech_rep_pattern=None`` (default) applies the built-in token set iteratively
+    (T<n> first, then a delimited injection/polarity/batch/rep token). Passing a
+    custom compiled/str pattern OVERRIDES the set and strips only that token
+    (still iteratively). Stripping never empties the stem and never removes a
+    non-delimited embedded number.
+    """
+    user_pat = _compile_pattern(tech_rep_pattern)
+    delim_pat = user_pat if user_pat is not None else _DELIM_TOKEN_RE
+    out = stem
+    for _ in range(max_tokens):
+        # 'T<n>' is unambiguously technical, so it is always stripped first,
+        # regardless of whether a custom delimited pattern was supplied.
+        m = _TREP_TOKEN_RE.search(out) or delim_pat.search(out)
+        if not m or m.start() == 0:          # nothing to strip / would empty stem
+            break
+        candidate = out[:m.start()].rstrip(_SEP_STRIP)
+        if not candidate:
+            break
+        out = candidate
+    return out
 
 
 def _posix(name):
@@ -108,7 +170,6 @@ def parse_sample(rel_path, tech_rep_pattern=None):
     -------
     (class_label, group_id, source) where source is 'folder' or 'prefix'.
     """
-    pat = _compile_pattern(tech_rep_pattern)
     parts = _rel_parts(rel_path)
     if len(parts) < 2:
         raise ValueError(
@@ -128,10 +189,10 @@ def parse_sample(rel_path, tech_rep_pattern=None):
         return class_label, group_id, 'folder'
 
     # Flat layout (exactly one directory level): recover the replicate from the
-    # filename prefix by stripping a trailing technical-replicate token.
+    # filename prefix by iteratively stripping trailing technical-replicate tokens.
     class_label = dirs[0]
     stem = _stem(fname)
-    stripped = pat.sub('', stem).rstrip(_SEP_STRIP)
+    stripped = _strip_tech_tokens(stem, tech_rep_pattern)
     group_id = stripped if stripped else stem
     return class_label, group_id, 'prefix'
 
@@ -175,6 +236,25 @@ def make_groups(y_labels, names, tech_rep_pattern=None, verbose=False,
         _cls, group_id, _src = parse_sample(nm, tech_rep_pattern)
         groups.append(f"{lab}::{group_id}")
     groups = np.array(groups)
+
+    # Explicit fallback warning: if stripping recovered NO shared replicate
+    # prefix, every file is its own group and the anti-pseudoreplication machinery
+    # is effectively disabled. Tell the user loudly so a naming mismatch does not
+    # silently inflate downstream cross-validated accuracy.
+    n_files = len(groups)
+    n_unique = len(set(groups.tolist()))
+    if n_files > 1 and n_unique == n_files:
+        warnings.warn(
+            f"Replicate grouping produced ONE GROUP PER FILE ({n_files} files -> "
+            f"{n_unique} groups): no technical replicates were detected, so every "
+            "spectrum is being treated as an independent biological sample. If your "
+            "files are technical replicates of fewer biological samples, their "
+            "names do not match the replicate-token rule. Verify your filename "
+            "structure, or pass an explicit tech_rep_pattern= to load_experiment()/"
+            "make_groups(). Proceeding as fully-independent samples can INFLATE "
+            "cross-validated accuracy.",
+            stacklevel=2,
+        )
 
     if verbose:
         summarize_groups(y_labels, names, groups)
@@ -327,7 +407,7 @@ def summarize_groups(y_labels, names, groups):
 # B4: batch / acquisition-order confound check                                  #
 # --------------------------------------------------------------------------- #
 def check_batch_confound(y_labels, groups, names=None, dominance_threshold=0.8,
-                         min_groups_warn=3, verbose=True):
+                         min_groups_warn=3, verbose=True, enforce=False):
     """Structural check for technical confounding in the class/replicate layout.
 
     Grouped CV stops technical replicates leaking, but it cannot detect a *design*
@@ -353,6 +433,39 @@ def check_batch_confound(y_labels, groups, names=None, dominance_threshold=0.8,
     y_labels = np.asarray(y_labels)
     groups = np.asarray(groups)
     warnings_out = []
+
+    # -- Hard enforcement: an n=1 design cannot be validated by grouped CV --------
+    # A class with a single biological group spread across several technical files
+    # would let cross-validation report a meaningless (typically ~1.0) score, since
+    # train and test folds then contain near-identical injections of the SAME
+    # sample. Fail loudly here instead of emitting a fake metric downstream.
+    if enforce:
+        offenders = []
+        for c in np.unique(y_labels):
+            in_c = (y_labels == c)
+            n_grp = len(set(groups[in_c].tolist()))
+            if n_grp < 2:
+                offenders.append((c, n_grp, int(in_c.sum())))
+        if offenders:
+            lines = [
+                f"  - class '{c}': only {n_grp} independent biological group(s) "
+                f"across {n_samp} file(s)"
+                for c, n_grp, n_samp in offenders
+            ]
+            raise ValueError(
+                "Grouped cross-validation requires at least 2 independent "
+                "biological groups per class to validate predictive power, but "
+                "these classes do not have enough:\n"
+                + "\n".join(lines)
+                + "\n\nEach listed class contains only ONE independent biological "
+                "sample measured as multiple technical injections, so any apparent "
+                "class separation is confounded with that single sample's identity "
+                "or acquisition batch — a CV score here would be meaningless "
+                "(typically a fake ~1.0). To proceed: add real biological "
+                "replicates, OR — if these files genuinely are separate biological "
+                "samples — adjust the replicate-token rule (tech_rep_pattern=) so "
+                "they are not collapsed into one group."
+            )
 
     for c in np.unique(y_labels):
         in_c = (y_labels == c)

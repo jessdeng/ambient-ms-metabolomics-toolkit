@@ -44,6 +44,9 @@ from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold, cross
 from sklearn.metrics import accuracy_score
 
 from r_comparable.pipeline import compute_vip_1comp
+# Single source of truth for the small-sample capacity guards (shared with the
+# standard pipeline so both branches constrain models identically).
+from shared.classifier_comparison_standard import small_sample_guards
 
 try:
     import config as _config
@@ -405,13 +408,13 @@ def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps,
 # as an alias for backward compatibility.
 
 def random_forest(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                  random_state=_SEED, n_repeats=1, return_metrics=False):
-    y   = _encode(y_labels)
-    est = RandomForestClassifier(n_estimators=100, random_state=random_state)
-    return _dispatch(est,
-                     lambda: RandomForestClassifier(n_estimators=100,
-                                                    random_state=random_state),
-                     X, y, n_splits, groups, prep_steps,
+                  random_state=_SEED, n_repeats=1, return_metrics=False,
+                  n_biological=None):
+    y  = _encode(y_labels)
+    g  = small_sample_guards(n_biological)['rf']
+    mk = lambda: RandomForestClassifier(n_estimators=100,
+                                        random_state=random_state, **g)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 # Backward-compatible alias
@@ -419,54 +422,53 @@ RandomForest = random_forest
 
 
 def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                 random_state=_SEED, n_repeats=1, return_metrics=False):
-    y   = _encode(y_labels)
-    est = SVC(kernel='linear', random_state=random_state)
-    return _dispatch(est,
-                     lambda: SVC(kernel='linear', random_state=random_state),
-                     X, y, n_splits, groups, prep_steps,
+                 random_state=_SEED, n_repeats=1, return_metrics=False,
+                 n_biological=None):
+    y  = _encode(y_labels)
+    g  = small_sample_guards(n_biological)['svm']
+    mk = lambda: SVC(kernel='linear', random_state=random_state, **g)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                      random_state=_SEED, n_repeats=1, return_metrics=False):
-    y   = _encode(y_labels)
-    est = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                     max_depth=3, random_state=random_state)
-    return _dispatch(est,
-                     lambda: GradientBoostingClassifier(n_estimators=100,
-                             learning_rate=0.1, max_depth=3,
-                             random_state=random_state),
-                     X, y, n_splits, groups, prep_steps,
+                      random_state=_SEED, n_repeats=1, return_metrics=False,
+                      n_biological=None):
+    y    = _encode(y_labels)
+    g    = small_sample_guards(n_biological)['gb']
+    base = dict(n_estimators=100, learning_rate=0.1, max_depth=3)
+    base.update(g)
+    mk   = lambda: GradientBoostingClassifier(random_state=random_state, **base)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                        random_state=_SEED, n_repeats=1, return_metrics=False):
-    y   = _encode(y_labels)
-    est = LogisticRegression(max_iter=1000, random_state=random_state)
-    return _dispatch(est,
-                     lambda: LogisticRegression(max_iter=1000,
-                                               random_state=random_state),
-                     X, y, n_splits, groups, prep_steps,
+                        random_state=_SEED, n_repeats=1, return_metrics=False,
+                        n_biological=None):
+    y  = _encode(y_labels)
+    g  = small_sample_guards(n_biological)['logreg']
+    mk = lambda: LogisticRegression(max_iter=1000, random_state=random_state, **g)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                 random_state=_SEED, n_repeats=1, return_metrics=False):
-    y   = _encode(y_labels)
-    est = LinearDiscriminantAnalysis()
-    return _dispatch(est, lambda: LinearDiscriminantAnalysis(),
-                     X, y, n_splits, groups, prep_steps,
+                 random_state=_SEED, n_repeats=1, return_metrics=False,
+                 n_biological=None):
+    y  = _encode(y_labels)
+    mk = lambda: LinearDiscriminantAnalysis()
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                   random_state=_SEED, n_repeats=1, return_metrics=False):
-    y   = _encode(y_labels)
-    est = RidgeClassifier()
-    return _dispatch(est, lambda: RidgeClassifier(),
-                     X, y, n_splits, groups, prep_steps,
+                   random_state=_SEED, n_repeats=1, return_metrics=False,
+                   n_biological=None):
+    y  = _encode(y_labels)
+    g  = small_sample_guards(n_biological)['ridge']
+    mk = lambda: RidgeClassifier(**g)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 

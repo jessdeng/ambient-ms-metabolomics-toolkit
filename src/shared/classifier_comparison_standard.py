@@ -319,6 +319,40 @@ def make_preprocessor(normalization='tic', log_transform='log10',
     ]
 
 
+# -- Small-sample capacity guards ------------------------------------------------
+SMALL_N_THRESHOLD = 6   # biological groups below which capacity is constrained
+
+
+def small_sample_guards(n_biological, threshold=SMALL_N_THRESHOLD):
+    """Per-model hyperparameter overrides that stop flexible classifiers from
+    memorising tiny designs.
+
+    When the number of INDEPENDENT biological groups is below ``threshold``,
+    unbounded trees and unregularised linear models can fit every training point
+    (train accuracy -> 1.0) and report misleading test scores on the handful of
+    held-out groups. This bounds tree depth / leaf size and tightens linear
+    regularisation in that regime. Returns a dict keyed by model tag; every value
+    is an empty dict when ``n_biological`` is unknown or >= ``threshold`` (so the
+    published defaults are preserved on adequately-powered datasets).
+    """
+    empty = {'rf': {}, 'gb': {}, 'svm': {}, 'logreg': {}, 'ridge': {}}
+    if n_biological is None:
+        return empty
+    n = int(n_biological)
+    if n >= threshold:
+        return empty
+    leaf  = max(2, n // 4)                 # >= 2 samples per leaf
+    depth = max(1, min(3, n - 2))          # shallow trees only
+    return {
+        'rf':     {'max_depth': depth, 'min_samples_leaf': leaf,
+                   'min_samples_split': max(2, leaf + 1)},
+        'gb':     {'max_depth': max(1, min(2, depth)), 'min_samples_leaf': leaf},
+        'svm':    {'C': 0.1},              # stronger margin regularisation
+        'logreg': {'C': 0.1},
+        'ridge':  {'alpha': 10.0},
+    }
+
+
 def auto_n_splits(y_labels, groups, desired=5):
     """
     Largest fold count compatible with the grouping. With g biological
@@ -511,58 +545,64 @@ def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps,
 # New signature: pass the BINNED matrix as X, plus groups= and prep_steps=.
 
 def RandomForest(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                 random_state=_SEED, n_repeats=1, return_metrics=False):
+                 random_state=_SEED, n_repeats=1, return_metrics=False,
+                 n_biological=None):
     y = _encode(y_labels)
-    est = RandomForestClassifier(n_estimators=100, random_state=random_state)
-    return _dispatch(est, lambda: RandomForestClassifier(n_estimators=100, random_state=random_state),
-                     X, y, n_splits, groups, prep_steps,
+    g = small_sample_guards(n_biological)['rf']
+    mk = lambda: RandomForestClassifier(n_estimators=100,
+                                        random_state=random_state, **g)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                 random_state=_SEED, n_repeats=1, return_metrics=False):
+                 random_state=_SEED, n_repeats=1, return_metrics=False,
+                 n_biological=None):
     y = _encode(y_labels)
-    est = SVC(kernel='linear', random_state=random_state)
-    return _dispatch(est, lambda: SVC(kernel='linear', random_state=random_state),
-                     X, y, n_splits, groups, prep_steps,
+    g = small_sample_guards(n_biological)['svm']
+    mk = lambda: SVC(kernel='linear', random_state=random_state, **g)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                      random_state=_SEED, n_repeats=1, return_metrics=False):
+                      random_state=_SEED, n_repeats=1, return_metrics=False,
+                      n_biological=None):
     y = _encode(y_labels)
-    est = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                     max_depth=3, random_state=random_state)
-    return _dispatch(est, lambda: GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                     max_depth=3, random_state=random_state),
-                     X, y, n_splits, groups, prep_steps,
+    g = small_sample_guards(n_biological)['gb']
+    base = dict(n_estimators=100, learning_rate=0.1, max_depth=3)
+    base.update(g)
+    mk = lambda: GradientBoostingClassifier(random_state=random_state, **base)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                        random_state=_SEED, n_repeats=1, return_metrics=False):
+                        random_state=_SEED, n_repeats=1, return_metrics=False,
+                        n_biological=None):
     y = _encode(y_labels)
-    est = LogisticRegression(max_iter=1000, random_state=random_state)
-    return _dispatch(est, lambda: LogisticRegression(max_iter=1000, random_state=random_state),
-                     X, y, n_splits, groups, prep_steps,
+    g = small_sample_guards(n_biological)['logreg']
+    mk = lambda: LogisticRegression(max_iter=1000, random_state=random_state, **g)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                 random_state=_SEED, n_repeats=1, return_metrics=False):
+                 random_state=_SEED, n_repeats=1, return_metrics=False,
+                 n_biological=None):
     y = _encode(y_labels)
-    est = LinearDiscriminantAnalysis()
-    return _dispatch(est, lambda: LinearDiscriminantAnalysis(),
-                     X, y, n_splits, groups, prep_steps,
+    mk = lambda: LinearDiscriminantAnalysis()
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
-                   random_state=_SEED, n_repeats=1, return_metrics=False):
+                   random_state=_SEED, n_repeats=1, return_metrics=False,
+                   n_biological=None):
     y = _encode(y_labels)
-    est = RidgeClassifier()
-    return _dispatch(est, lambda: RidgeClassifier(),
-                     X, y, n_splits, groups, prep_steps,
+    g = small_sample_guards(n_biological)['ridge']
+    mk = lambda: RidgeClassifier(**g)
+    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
                      n_repeats=n_repeats, return_metrics=return_metrics)
 
 

@@ -44,7 +44,7 @@ from shared.classifier_comparison import (
     feature_importance_analysis,
     make_preprocessor, auto_n_splits,
 )
-from shared.grouping import make_groups, permute_labels_by_group
+from shared.grouping import make_groups, permute_labels_by_group, check_batch_confound
 
 # ── Per-pipeline default resolution ──────────────────────────────────────────
 _json_keys     = getattr(config, '_json_keys', set())
@@ -69,7 +69,13 @@ def _load_and_preprocess(experiment_name):
     experiment_dir, experiment_name, _ = resolve_experiment_dir(
         BASE_DIR, experiment_name)
 
-    X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir)
+    # validate=False + explicit enforce so the post-hoc scripts fail fast with the
+    # SAME word-for-word n=1 confound error as run_analysis (cross-entry parity).
+    X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir,
+                                                        validate=False)
+    check_batch_confound(y_labels,
+                         make_groups(y_labels, sample_names, validate=False),
+                         names=sample_names, enforce=True)
 
     X_binned, mz = bin_features(X_raw, mz, bin_width=config.BIN_WIDTH)
     X_binned, mz = filter_mass_range(X_binned, mz,

@@ -10,6 +10,8 @@ Usage:
 """
 
 # All functions are identical to standard/pipeline.py — re-export directly.
+# This includes the defensive helpers (adaptive_n_components,
+# optimize_plsda_components) so both branches share the SAME dimensionality caps.
 from standard.pipeline import (
     fit_plsda,
     compute_vip,
@@ -17,6 +19,8 @@ from standard.pipeline import (
     compute_plsda_q2,
     compute_plsda_r2y,
     evaluate_plsda_q2,
+    adaptive_n_components,
+    optimize_plsda_components,
     plot_scores_3d,
     plot_vip,
 )

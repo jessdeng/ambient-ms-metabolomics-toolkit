@@ -17,14 +17,15 @@ from standard.preprocessing import (load_experiment, bin_features,
     filter_mass_range, filter_snr_floor, filter_prevalence,
     filter_low_variance, filter_low_abundance, preprocess)
 from standard.pipeline import (compute_vip, compute_vip_1comp, fit_plsda,
-                               plot_scores_3d, plot_vip, evaluate_plsda_q2)
+                               plot_scores_3d, plot_vip, evaluate_plsda_q2,
+                               adaptive_n_components, optimize_plsda_components)
 from shared.classifier_comparison_standard import (
     RandomForest, svm_classify, gradient_boosting,
     logistic_regression, lda_classify, ridge_classify,
     plot_accuracy_comparison, feature_importance_analysis,
     make_preprocessor, auto_n_splits, grouped_permutation_importance,
 )
-from shared.grouping import make_groups
+from shared.grouping import make_groups, check_batch_confound
 from shared.visualization import plot_spectrum_with_features
 from shared.runtime import resolve_experiment_dir, write_run_manifest
 
@@ -50,9 +51,30 @@ def main():
 
     # -- 1. Load -----------------------------------------------------------------
     print(f"\n[1/12] Loading data: {experiment_name!r}")
-    X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir)
+    # validate=False: defer the in-loader pre-flight so the explicit confound
+    # guardrail below owns the failure message (clear n=1 explanation).
+    X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir,
+                                                        validate=False)
     print(f"  Raw samples : {X_raw.shape[0]}")
     print(f"  Raw features: {X_raw.shape[1]}")
+
+    # -- 1b. Guardrail: enforce a validatable design BEFORE any modelling --------
+    # Build the leave-one-biological-replicate-out groups now (single source of
+    # truth, reused below) and HARD-FAIL on an n=1 design so cross-validation can
+    # never emit a misleading ~1.0 score on a confounded study.
+    groups   = make_groups(y_labels, sample_names, validate=False)
+    n_groups = len(set(groups))
+    n_classes = int(np.unique(y_labels).size)
+    check_batch_confound(y_labels, groups, names=sample_names, enforce=True)
+
+    # Context-aware PLS-DA dimensionality: cap latent variables to the design
+    # (binary -> <=2; never more than n_groups-1) so R^2Y is not forced to 1.0.
+    n_comp_eff = adaptive_n_components(n_classes, n_groups,
+                                       config.N_PLSDA_COMPONENTS)
+    if n_comp_eff != config.N_PLSDA_COMPONENTS:
+        print(f"  [adaptive] PLS-DA components capped "
+              f"{config.N_PLSDA_COMPONENTS} -> {n_comp_eff} "
+              f"(n_classes={n_classes}, biological groups={n_groups})")
 
     # -- 2. Bin ------------------------------------------------------------------
     # X_binned is the per-sample binned matrix BEFORE any filtering/scaling.
@@ -135,9 +157,8 @@ def main():
     X = preprocess(X_filt, normalization=config.NORMALIZATION,
                    log_transform=config.LOG_TRANSFORM, scaling=config.SCALING)
 
-    # -- Grouping + leak-free preprocessor for cross-validation ------------------
-    groups   = make_groups(y_labels, sample_names)
-    n_groups = len(set(groups))
+    # -- Leak-free preprocessor for cross-validation -----------------------------
+    # `groups` / `n_groups` were built and validated in step 1b above.
     prep_steps = make_preprocessor(
         normalization=config.NORMALIZATION, log_transform=config.LOG_TRANSFORM,
         scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
@@ -157,8 +178,8 @@ def main():
           f"(StratifiedGroupKFold, {n_splits} folds, {n_groups} colonies)")
 
     # -- 5. PLS-DA (descriptive) -------------------------------------------------
-    print(f"\n[5/12] Fitting PLS-DA ({config.N_PLSDA_COMPONENTS} components)")
-    pls, T, y, Y, classes = fit_plsda(X, y_labels, config.N_PLSDA_COMPONENTS)
+    print(f"\n[5/12] Fitting PLS-DA ({n_comp_eff} components)")
+    pls, T, y, Y, classes = fit_plsda(X, y_labels, n_comp_eff)
     print(f"  Classes: {list(classes)}")
 
     # -- 6. VIP scores (descriptive) ---------------------------------------------
@@ -183,7 +204,7 @@ def main():
     if getattr(config, 'RUN_PLSDA_Q2', False):
         print(f"\n  PLS-DA R^2Y / Q^2 (+ {config.N_Q2_PERMUTATIONS}-permutation null)")
         plsda_qual = evaluate_plsda_q2(
-            X, y_labels, config.N_PLSDA_COMPONENTS, groups=groups,
+            X, y_labels, n_comp_eff, groups=groups,
             n_splits=n_splits, n_perm=config.N_Q2_PERMUTATIONS,
             random_state=config.RANDOM_SEED,
         )
@@ -216,6 +237,7 @@ def main():
                 X_binned, y_labels, n_splits=n_splits,
                 groups=groups, prep_steps=prep_steps,
                 n_repeats=n_repeats, return_metrics=True,
+                n_biological=n_groups,
             )
             test_accs  = metrics['test_accuracy']
             train_accs = metrics['train_accuracy']

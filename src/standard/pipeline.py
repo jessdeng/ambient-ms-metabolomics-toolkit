@@ -165,6 +165,49 @@ def compute_plsda_r2y(X, y_labels, n_components):
     return 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
 
+def adaptive_n_components(n_classes, n_groups, requested, binary_cap=2):
+    """Context-aware PLS-DA latent-variable count.
+
+    Caps the *requested* component count to what the design can actually support,
+    so the model cannot trivially drive R^2Y -> 1.0:
+
+      * never more than ``n_independent_biological_groups - 1`` (a PLS model with
+        as many components as groups reconstructs the response exactly);
+      * for a binary problem, never more than ``binary_cap`` (default 2) — a
+        2-class separation needs ~1 latent variable; extra LVs only overfit.
+
+    Always returns at least 1. Use this in place of a hard-coded N_PLSDA_COMPONENTS.
+    """
+    feasible = max(1, int(n_groups) - 1)
+    cap = min(int(requested), feasible)
+    if int(n_classes) <= 2:
+        cap = min(cap, int(binary_cap))
+    return int(max(1, cap))
+
+
+def optimize_plsda_components(X, y_labels, groups=None, max_components=None,
+                              n_splits=5, random_state=42):
+    """Pick the LV count in ``1..max_components`` that maximises grouped Q^2.
+
+    A principled alternative to a fixed component count: every candidate is scored
+    with the SAME leave-one-biological-group-out Q^2 used elsewhere, so the choice
+    reflects out-of-sample predictivity rather than in-sample fit. The upper bound
+    defaults to ``n_groups - 1``. Returns ``(best_n_components, best_q2)`` and
+    falls back to 1 component if no model achieves a finite Q^2.
+    """
+    n_groups = (len(set(np.asarray(groups).tolist())) if groups is not None
+                else int(np.unique(y_labels).size))
+    hi = max_components if max_components is not None else max(1, n_groups - 1)
+    hi = int(max(1, min(hi, X.shape[1], X.shape[0] - 2)))
+    best_a, best_q2 = 1, -np.inf
+    for a in range(1, hi + 1):
+        q2 = compute_plsda_q2(X, y_labels, a, groups=groups, n_splits=n_splits,
+                              random_state=random_state)
+        if np.isfinite(q2) and q2 > best_q2:
+            best_q2, best_a = q2, a
+    return best_a, (best_q2 if np.isfinite(best_q2) else np.nan)
+
+
 def evaluate_plsda_q2(X, y_labels, n_components, groups=None, n_splits=5,
                       n_perm=200, random_state=42):
     """PLS-DA model quality: observed R^2Y and Q^2 + a permutation null for BOTH.
@@ -221,6 +264,14 @@ def plot_scores_3d(T, pls, y_labels, classes, experiment_name, out_path):
     Q = pls.y_loadings_
     SS = np.sum(T_all ** 2, axis=0) * np.sum(Q ** 2, axis=0)
     pct_cov = SS / SS.sum() * 100
+
+    # Adaptive component capping can leave fewer than 3 latent variables (a binary
+    # design is capped at <=2). The 3-D scatter indexes components 1-3, so pad any
+    # missing axes with zeros and a 0% label instead of raising an IndexError.
+    if T.shape[1] < 3:
+        pad = 3 - T.shape[1]
+        T = np.hstack([T, np.zeros((T.shape[0], pad))])
+        pct_cov = np.concatenate([pct_cov, np.zeros(pad)])
 
     fig = go.Figure()
     palette = sns.color_palette('colorblind', n_colors=len(classes))
