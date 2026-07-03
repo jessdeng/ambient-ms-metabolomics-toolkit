@@ -333,17 +333,12 @@ def filter_low_variance(X, mz, percentile=25):
     """
     Remove features with low relative standard deviation (RSD).
     Matches MetaboAnalyst's 'Interquartile range' filter at 25%.
+
+    The retention rule is delegated to ``variance_keep_mask`` so the full-data
+    descriptive path and the per-fold ``VarianceFilter`` transformer apply the
+    identical RSD computation and zero-mean guard.
     """
-    mean = X.mean(axis=0)
-    # Zero-guard: features with a (near-)zero mean would make RSD blow up to
-    # inf/NaN and corrupt the percentile threshold. Floor the denominator and
-    # force RSD=0 for those features so they sort to the bottom and are dropped.
-    mean_safe = np.where(np.abs(mean) < 1e-12, 1e-12, mean)
-    rsd = X.std(axis=0) / mean_safe
-    rsd = np.where(np.abs(mean) < 1e-12, 0.0, rsd)
-    rsd = np.where(np.isfinite(rsd), rsd, 0.0)
-    threshold = np.percentile(rsd, percentile)
-    keep = rsd > threshold
+    keep = variance_keep_mask(X, percentile)
     return X[:, keep], mz[keep]
 
 
@@ -351,16 +346,196 @@ def filter_low_abundance(X, mz, percentile=5):
     """
     Remove features with low mean intensity.
     Uses mean (not median) and 5% cutoff to match MetaboAnalyst.
+
+    The retention rule is delegated to ``abundance_keep_mask`` so the full-data
+    descriptive path and the per-fold ``AbundanceFilter`` transformer share one
+    implementation.
     """
-    mean_intensity = np.mean(X, axis=0)
-    threshold = np.percentile(mean_intensity, percentile)
-    keep = mean_intensity > threshold
+    keep = abundance_keep_mask(X, percentile)
     return X[:, keep], mz[keep]
 
 
-def preprocess(X, normalization='tic', log_transform='log10', scaling='autoscale'):
+# ── Feature-retention masks (single source of truth) ────────────────────────────
+# Both the full-data descriptive filters (filter_low_variance / filter_low_abundance)
+# and the per-fold CV transformers (VarianceFilter / AbundanceFilter) call these,
+# so feature selection is computed identically on both paths.
+
+def variance_keep_mask(X, percentile=25):
+    """Boolean keep-mask for the low-relative-variance (RSD) filter.
+
+    Features with an (near-)zero mean would drive RSD to inf/NaN and corrupt the
+    percentile threshold, so the denominator is floored and their RSD forced to
+    0 (they sort to the bottom and are dropped). ``percentile <= 0`` disables the
+    filter (all features kept).
+    """
+    X = np.asarray(X, dtype=float)
+    if percentile <= 0:
+        return np.ones(X.shape[1], dtype=bool)
+    mean = X.mean(axis=0)
+    mean_safe = np.where(np.abs(mean) < 1e-12, 1e-12, mean)
+    rsd = X.std(axis=0) / mean_safe
+    rsd = np.where(np.abs(mean) < 1e-12, 0.0, rsd)
+    rsd = np.where(np.isfinite(rsd), rsd, 0.0)
+    return rsd > np.percentile(rsd, percentile)
+
+
+def abundance_keep_mask(X, percentile=5):
+    """Boolean keep-mask for the low-mean-intensity filter.
+
+    ``percentile <= 0`` disables the filter (all features kept).
+    """
+    X = np.asarray(X, dtype=float)
+    if percentile <= 0:
+        return np.ones(X.shape[1], dtype=bool)
+    mean_intensity = X.mean(axis=0)
+    return mean_intensity > np.percentile(mean_intensity, percentile)
+
+
+# ── Normalisation / transformation / scaling primitives ─────────────────────────
+# Canonical fit_*/apply_* pairs. The full-data preprocess() below AND the per-fold
+# transformer classes in shared/classifier_comparison*.py both delegate here, so
+# the descriptive path and the in-fold CV path apply byte-identical mathematics —
+# eliminating the drift risk of two parallel implementations.
+#
+#   * on the full-data path fit and apply see the same matrix, reproducing the
+#     previous monolithic preprocess() exactly;
+#   * inside CV, fit runs on the training fold and apply runs on the held-out
+#     fold, so no test-fold statistic ever informs a training transform.
+
+def fit_normalization(X, method):
+    """Fit sample-normalisation parameters on X. Returns a params dict."""
+    X = np.asarray(X, dtype=float)
+    if method == 'tic':
+        row_sums = X.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1.0, row_sums)
+        return {'const': float(np.median(row_sums))}
+    if method == 'median':
+        row_medians = np.median(X, axis=1, keepdims=True)
+        row_medians = np.where(row_medians == 0, 1.0, row_medians)
+        return {'const': float(np.median(row_medians))}
+    if method == 'pqn':
+        # Probabilistic Quotient Normalization (Dieterle et al. 2006 Anal Chem 78:4281).
+        # Reference spectrum = median of the TIC-normalised training samples.
+        row_sums = X.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1.0, row_sums)
+        reference = np.median(X / row_sums, axis=0)
+        reference = np.where(reference == 0, 1.0, reference)
+        return {'reference': reference}
+    if method == 'quantile':
+        return {'row_means': np.sort(X, axis=1).mean(axis=0)}
+    if method == 'none':
+        return {}
+    raise ValueError(f"Unknown normalization: '{method}'. "
+                     f"Choose from: 'tic', 'median', 'pqn', 'quantile', 'none'.")
+
+
+def apply_normalization(X, method, params):
+    """Apply fitted sample normalisation to X."""
+    X = np.asarray(X, dtype=float)
+    if method == 'tic':
+        row_sums = X.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1.0, row_sums)
+        return X / row_sums * params['const']
+    if method == 'median':
+        row_medians = np.median(X, axis=1, keepdims=True)
+        row_medians = np.where(row_medians == 0, 1.0, row_medians)
+        return X / row_medians * params['const']
+    if method == 'pqn':
+        row_sums = X.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1.0, row_sums)
+        X_tic = X / row_sums
+        quotients = X_tic / params['reference']
+        dilution = np.median(quotients, axis=1, keepdims=True)
+        dilution = np.where(dilution == 0, 1.0, dilution)
+        return X_tic / dilution
+    if method == 'quantile':
+        ranks = np.argsort(np.argsort(X, axis=1), axis=1)
+        return params['row_means'][ranks]
+    if method == 'none':
+        return X
+    raise ValueError(f"Unknown normalization: '{method}'.")
+
+
+def fit_transform_params(X, method):
+    """Fit transform parameters (glog lambda / log half-min offset) on X."""
+    X = np.asarray(X, dtype=float)
+    if method in ('log10', 'log2'):
+        min_positive = X[X > 0].min() if (X > 0).any() else 1e-6
+        return {'half_min': min_positive / 2.0}
+    if method == 'glog':
+        # lambda_ = 5th percentile of positive values — a robust noise-floor estimate.
+        pos_vals = X[X > 0]
+        lambda_ = np.percentile(pos_vals, 5) if len(pos_vals) else 1.0
+        return {'lambda': max(float(lambda_), 1e-10)}
+    if method in ('sqrt', 'none'):
+        return {}
+    raise ValueError(f"Unknown log_transform: '{method}'. "
+                     f"Choose from: 'glog', 'log10', 'log2', 'sqrt', 'none'.")
+
+
+def apply_transform(X, method, params):
+    """Apply the fitted transform to X."""
+    X = np.asarray(X, dtype=float)
+    if method == 'glog':
+        return np.arcsinh(X / params['lambda'])
+    if method == 'log10':
+        return np.log10(X + params['half_min'])
+    if method == 'log2':
+        return np.log2(X + params['half_min'])
+    if method == 'sqrt':
+        return np.sqrt(X)
+    if method == 'none':
+        return X
+    raise ValueError(f"Unknown log_transform: '{method}'.")
+
+
+def fit_scaling(X, method):
+    """Fit per-feature scaling parameters on X."""
+    X = np.asarray(X, dtype=float)
+    feat_mean = X.mean(axis=0)
+    feat_std = X.std(axis=0, ddof=1)
+    feat_std = np.where(feat_std == 0, 1.0, feat_std)
+    params = {'mean': feat_mean, 'std': feat_std}
+    if method == 'range':
+        feat_range = X.max(axis=0) - X.min(axis=0)
+        params['range'] = np.where(feat_range == 0, 1.0, feat_range)
+    elif method not in ('autoscale', 'pareto', 'vast', 'level', 'none'):
+        raise ValueError(f"Unknown scaling: '{method}'. Choose from: "
+                         f"'autoscale', 'pareto', 'range', 'vast', 'level', 'none'.")
+    return params
+
+
+def apply_scaling(X, method, params):
+    """Apply the fitted scaling to X."""
+    X = np.asarray(X, dtype=float)
+    mean = params['mean']
+    std = params['std']
+    if method == 'autoscale':
+        return (X - mean) / std
+    if method == 'pareto':
+        return (X - mean) / np.sqrt(std)
+    if method == 'range':
+        return (X - mean) / params['range']
+    if method == 'vast':
+        return ((X - mean) / std) * (mean / (std + 1e-10))
+    if method == 'level':
+        level = np.abs(mean)
+        level = np.where(level == 0, 1.0, level)
+        return (X - mean) / level
+    if method == 'none':
+        return X - mean
+    raise ValueError(f"Unknown scaling: '{method}'.")
+
+
+def preprocess(X, normalization='tic', log_transform='log10', scaling='autoscale',
+               return_stages=False):
     """
     Normalize, transform, and scale the data.
+
+    The three operations are delegated to the shared fit_*/apply_* primitives, so
+    this full-data path applies the identical mathematics to the per-fold
+    transformers used inside cross-validation. On this path fit and apply see the
+    same matrix (reproducing the previous monolithic implementation exactly).
 
     Parameters
     ----------
@@ -376,98 +551,51 @@ def preprocess(X, normalization='tic', log_transform='log10', scaling='autoscale
     scaling : str
         Scaling method. Options: 'autoscale', 'pareto', 'range', 'vast', 'level', 'none'.
         See van den Berg et al. (2006) BMC Genomics 7:142 for guidance.
+    return_stages : bool
+        If True, return the intermediate matrices instead of only the final scaled
+        matrix::
+
+            {'normalized':  linear normalised matrix (BEFORE transform/scaling),
+             'transformed': after the log/glog transform,
+             'scaled':      final normalised+transformed+scaled matrix}
+
+        The 'normalized' matrix is the linear, non-negative intensity matrix the
+        chemometric QC metrics (technical %CV, D-ratio) require; it must NOT be
+        derived from the transformed or scaled outputs.
+
+    Returns
+    -------
+    ndarray
+        Final scaled matrix when ``return_stages`` is False (default), otherwise a
+        dict of the three stage matrices described above.
     """
+    X = np.asarray(X, dtype=float)
 
-    # -- Normalization -----------------------------------------------------------
-    if normalization == 'tic':
-        row_sums = X.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1
-        X = X / row_sums * np.median(row_sums)
+    X_normalized = apply_normalization(X, normalization,
+                                       fit_normalization(X, normalization))
+    X_transformed = apply_transform(X_normalized, log_transform,
+                                    fit_transform_params(X_normalized, log_transform))
+    X_scaled = apply_scaling(X_transformed, scaling,
+                             fit_scaling(X_transformed, scaling))
 
-    elif normalization == 'median':
-        row_medians = np.median(X, axis=1, keepdims=True)
-        row_medians[row_medians == 0] = 1
-        X = X / row_medians * np.median(row_medians)
+    if return_stages:
+        return {'normalized': X_normalized,
+                'transformed': X_transformed,
+                'scaled': X_scaled}
+    return X_scaled
 
-    elif normalization == 'pqn':
-        # Probabilistic Quotient Normalization
-        # Reference: Dieterle et al. (2006) Anal Chem 78:4281
-        # 1. TIC-normalize first as a preliminary step
-        row_sums = X.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1
-        X_tic = X / row_sums
-        # 2. Reference spectrum = median of all TIC-normalized samples
-        reference = np.median(X_tic, axis=0)
-        reference[reference == 0] = 1
-        # 3. Quotients = each sample divided by reference
-        quotients = X_tic / reference
-        # 4. Dilution factor = median of quotients per sample
-        dilution = np.median(quotients, axis=1, keepdims=True)
-        dilution[dilution == 0] = 1
-        X = X_tic / dilution
 
-    elif normalization == 'quantile':
-        # Quantile normalization: force all samples to same distribution
-        ranks = np.argsort(np.argsort(X, axis=1), axis=1)
-        sorted_X = np.sort(X, axis=1)
-        row_means = sorted_X.mean(axis=0)
-        X = row_means[ranks]
+def normalize_only(X, normalization='tic'):
+    """
+    Return the LINEAR normalised intensity matrix — normalisation applied, but
+    BEFORE any glog/log transform or scaling.
 
-    elif normalization == 'none':
-        pass
-
-    else:
-        raise ValueError(f"Unknown normalization: '{normalization}'. "
-                         f"Choose from: 'tic', 'median', 'pqn', 'quantile', 'none'.")
-
-    # -- Transformation ----------------------------------------------------------
-    min_positive = X[X > 0].min() if (X > 0).any() else 1e-6
-    half_min = min_positive / 2
-
-    if log_transform == 'glog':
-        # Generalised-log / asinh transform: arcsinh(x / lambda_)
-        # lambda_ = 5th percentile of positive values — a robust noise-floor
-        # estimate computed from all data (full-data path; per-fold lambda_ is
-        # fitted from the training fold inside the CV pipeline transformers).
-        pos_vals  = X[X > 0]
-        lambda_   = np.percentile(pos_vals, 5) if len(pos_vals) else 1.0
-        lambda_   = max(float(lambda_), 1e-10)
-        X = np.arcsinh(X / lambda_)
-    elif log_transform == 'log10':
-        X = np.log10(X + half_min)
-    elif log_transform == 'log2':
-        X = np.log2(X + half_min)
-    elif log_transform == 'sqrt':
-        X = np.sqrt(X)
-    elif log_transform == 'none':
-        pass
-    else:
-        raise ValueError(f"Unknown log_transform: '{log_transform}'. "
-                         f"Choose from: 'glog', 'log10', 'log2', 'sqrt', 'none'.")
-
-    # -- Scaling -----------------------------------------------------------------
-    feat_mean = X.mean(axis=0)
-    feat_std  = X.std(axis=0, ddof=1)
-    feat_std[feat_std == 0] = 1
-
-    if scaling == 'autoscale':
-        X = (X - feat_mean) / feat_std
-    elif scaling == 'pareto':
-        X = (X - feat_mean) / np.sqrt(feat_std)
-    elif scaling == 'range':
-        feat_range = X.max(axis=0) - X.min(axis=0)
-        feat_range[feat_range == 0] = 1
-        X = (X - feat_mean) / feat_range
-    elif scaling == 'vast':
-        X = ((X - feat_mean) / feat_std) * (feat_mean / (feat_std + 1e-10))
-    elif scaling == 'level':
-        level = np.abs(feat_mean)
-        level[level == 0] = 1
-        X = (X - feat_mean) / level
-    elif scaling == 'none':
-        X = X - feat_mean
-    else:
-        raise ValueError(f"Unknown scaling: '{scaling}'. "
-                         f"Choose from: 'autoscale', 'pareto', 'range', 'vast', 'level', 'none'.")
-
-    return X
+    This is the matrix required by src/shared/quality_metrics.py for technical
+    %CV, biological %CV and the Broadhurst D-ratio: coefficient of variation is
+    only meaningful on a linear, non-negative intensity scale, so it is isolated
+    here rather than derived from the transformed or scaled output. Equivalent to
+    ``preprocess(X, normalization, log_transform='none', scaling='none')['normalized']``
+    but returned directly.
+    """
+    X = np.asarray(X, dtype=float)
+    return apply_normalization(X, normalization, fit_normalization(X, normalization))

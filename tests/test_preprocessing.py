@@ -258,7 +258,7 @@ class TestTransformerAgreement:
         X = self._rng_matrix(seed=7)
         lt = LogTransform(method='glog')
         lt.fit(X)
-        lambda_ = lt.lambda_
+        lambda_ = lt.params_['lambda']
 
         out_tf     = lt.transform(X.copy())
         out_direct = np.arcsinh(X / lambda_)
@@ -402,7 +402,7 @@ class TestRComparableRegression:
         lt  = LogTransform(method='log10')
         lt.fit(X)
         out    = lt.transform(X.copy())
-        expect = np.log10(X + lt.half_)
+        expect = np.log10(X + lt.params_['half_min'])
         assert np.allclose(out, expect, atol=1e-12), \
             "log10 branch changed after glog addition in classifier_comparison_standard"
 
@@ -414,7 +414,7 @@ class TestRComparableRegression:
         lt  = LogTransform(method='log10')
         lt.fit(X)
         out    = lt.transform(X.copy())
-        expect = np.log10(X + lt.half_)
+        expect = np.log10(X + lt.params_['half_min'])
         assert np.allclose(out, expect, atol=1e-12), \
             "log10 branch changed after glog addition in classifier_comparison"
 

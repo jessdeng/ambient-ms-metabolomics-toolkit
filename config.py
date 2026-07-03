@@ -324,6 +324,48 @@ N_PERMUTATIONS = 100
 HIGH_CONFIDENCE_N_METHODS = 4
 
 
+# ── Quality-control metrics (chemometric QC) ─────────────────────────────────
+# Analytical-reproducibility QC computed on the LINEAR normalised matrix
+# (normalised, but BEFORE glog/log and autoscaling — see
+# preprocessing.normalize_only). Coefficient of variation is only meaningful on a
+# linear, non-negative intensity scale, so these MUST NOT be computed on the
+# transformed or scaled matrix.
+RUN_QC_METRICS = True            # compute technical %CV, biological %CV, D-ratio
+QC_AGGREGATE = 'median'          # pool per-unit %CV across units: 'median' | 'mean'
+MIN_TECH_REPLICATES = 2          # min technical replicates for a unit to define %CV / D-ratio
+EXPORT_QC_TABLE = True           # write qc_features_<exp>.csv + study-level summary
+
+# Feature-acceptance thresholds (surfaced from quality_metrics so Methods can quote
+# them from one place). A feature is analytically reproducible when its technical
+# %CV <= CV_ACCEPT_PCT and its Broadhurst D-ratio <= DRATIO_ACCEPT_PCT.
+CV_ACCEPT_PCT = 30.0             # <=30% technical CV: standard untargeted-MS threshold
+CV_STRICT_PCT = 20.0             # <=20%: stricter targeted-assay threshold
+DRATIO_ACCEPT_PCT = 50.0         # <=50% D-ratio: technical spread < biological spread
+
+
+# ── Cross-validation design guards ───────────────────────────────────────────
+# StratifiedGroupKFold needs at least this many independent biological groups
+# (colonies) per class or grouped CV is undefined; the loader/orchestrator raises
+# rather than silently emitting a degenerate fold.
+MIN_BIO_GROUPS_PER_CLASS = 2
+
+
+# ── Classification benchmarking (multi-class) ────────────────────────────────
+# Leak-free pooled out-of-fold predictions -> macro-F1, per-class recall/precision
+# and a pooled confusion matrix, generated with the SAME grouped, per-fold
+# preprocessing pipeline as the accuracy path (no preprocessing leakage).
+RUN_CLASSIFICATION_BENCHMARK = True
+EXPORT_BENCHMARK_TABLE = True    # write classification_metrics_<exp>.csv
+EXPORT_CONFUSION_MATRIX = True   # save the Analyst-standard confusion-matrix figure
+CONFUSION_MATRIX_NORMALIZE = True  # annotate row-normalised rates (with raw counts)
+
+
+# ── Supplementary outputs ────────────────────────────────────────────────────
+# Subdirectory (under results/<pipeline>/) for supplementary QC and benchmark
+# artefacts, kept separate from the main manuscript figures.
+SUPPLEMENTARY_SUBDIR = 'supplementary'
+
+
 # ── Load overrides from config.json (if present) ─────────────────────────────
 # Any key in config.json that matches a variable name above will override it.
 # Keys starting with '_' (like "_comment") are ignored.

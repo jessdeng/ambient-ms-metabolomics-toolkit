@@ -40,13 +40,20 @@ from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold, cross_validate
-from sklearn.metrics import accuracy_score
+from sklearn.model_selection import StratifiedGroupKFold, cross_validate
 
 from r_comparable.pipeline import compute_vip_1comp
 # Single source of truth for the small-sample capacity guards (shared with the
 # standard pipeline so both branches constrain models identically).
 from shared.classifier_comparison_standard import small_sample_guards
+# Canonical preprocessing primitives — shared with the full-data descriptive path
+# so the per-fold transformers below apply byte-identical mathematics (no drift).
+from standard.preprocessing import (
+    fit_normalization, apply_normalization,
+    fit_transform_params, apply_transform,
+    fit_scaling, apply_scaling,
+    variance_keep_mask, abundance_keep_mask,
+)
 
 try:
     import config as _config
@@ -142,13 +149,7 @@ class VarianceFilter(BaseEstimator, TransformerMixin):
         self.percentile = percentile
 
     def fit(self, X, y=None):
-        if self.percentile <= 0:
-            self.keep_ = np.ones(X.shape[1], dtype=bool)
-            return self
-        mean = X.mean(axis=0).copy()
-        mean[mean == 0] = 1e-12
-        rsd  = X.std(axis=0) / mean
-        self.keep_ = rsd > np.percentile(rsd, self.percentile)
+        self.keep_ = variance_keep_mask(X, self.percentile)
         return self
 
     def transform(self, X):
@@ -161,11 +162,7 @@ class AbundanceFilter(BaseEstimator, TransformerMixin):
         self.percentile = percentile
 
     def fit(self, X, y=None):
-        if self.percentile <= 0:
-            self.keep_ = np.ones(X.shape[1], dtype=bool)
-            return self
-        m = X.mean(axis=0)
-        self.keep_ = m > np.percentile(m, self.percentile)
+        self.keep_ = abundance_keep_mask(X, self.percentile)
         return self
 
     def transform(self, X):
@@ -178,40 +175,11 @@ class Normalizer(BaseEstimator, TransformerMixin):
         self.method = method
 
     def fit(self, X, y=None):
-        if self.method == 'tic':
-            self.const_ = np.median(X.sum(axis=1, keepdims=True))
-        elif self.method == 'median':
-            self.const_ = np.median(np.median(X, axis=1, keepdims=True))
-        elif self.method == 'pqn':
-            rs  = X.sum(axis=1, keepdims=True); rs[rs == 0] = 1
-            ref = np.median(X / rs, axis=0); ref[ref == 0] = 1
-            self.ref_ = ref
-        elif self.method == 'quantile':
-            self.row_means_ = np.sort(X, axis=1).mean(axis=0)
-        elif self.method == 'none':
-            pass
-        else:
-            raise ValueError(f"Unknown normalization: '{self.method}'")
+        self.params_ = fit_normalization(X, self.method)
         return self
 
     def transform(self, X):
-        X = X.astype(float)
-        if self.method == 'tic':
-            rs = X.sum(axis=1, keepdims=True); rs[rs == 0] = 1
-            return X / rs * self.const_
-        if self.method == 'median':
-            rm = np.median(X, axis=1, keepdims=True); rm[rm == 0] = 1
-            return X / rm * self.const_
-        if self.method == 'pqn':
-            rs = X.sum(axis=1, keepdims=True); rs[rs == 0] = 1
-            Xt = X / rs
-            q  = Xt / self.ref_
-            d  = np.median(q, axis=1, keepdims=True); d[d == 0] = 1
-            return Xt / d
-        if self.method == 'quantile':
-            ranks = np.argsort(np.argsort(X, axis=1), axis=1)
-            return self.row_means_[ranks]
-        return X
+        return apply_normalization(X, self.method, self.params_)
 
 
 class LogTransform(BaseEstimator, TransformerMixin):
@@ -226,27 +194,11 @@ class LogTransform(BaseEstimator, TransformerMixin):
         self.method = method
 
     def fit(self, X, y=None):
-        if self.method in ('log10', 'log2'):
-            mp = X[X > 0].min() if (X > 0).any() else 1e-6
-            self.half_ = mp / 2
-        elif self.method == 'glog':
-            pos = X[X > 0]
-            lam = np.percentile(pos, 5) if len(pos) else 1.0
-            self.lambda_ = max(float(lam), 1e-10)
+        self.params_ = fit_transform_params(X, self.method)
         return self
 
     def transform(self, X):
-        if self.method == 'glog':
-            return np.arcsinh(X / self.lambda_)
-        if self.method == 'log10':
-            return np.log10(X + self.half_)
-        if self.method == 'log2':
-            return np.log2(X + self.half_)
-        if self.method == 'sqrt':
-            return np.sqrt(X)
-        if self.method == 'none':
-            return X
-        raise ValueError(f"Unknown log_transform: '{self.method}'")
+        return apply_transform(X, self.method, self.params_)
 
 
 class Scaler(BaseEstimator, TransformerMixin):
@@ -255,30 +207,11 @@ class Scaler(BaseEstimator, TransformerMixin):
         self.method = method
 
     def fit(self, X, y=None):
-        self.mean_ = X.mean(axis=0)
-        self.std_  = X.std(axis=0, ddof=1)
-        self.std_[self.std_ == 0] = 1
-        if self.method == 'range':
-            self.range_ = X.max(axis=0) - X.min(axis=0)
-            self.range_[self.range_ == 0] = 1
+        self.params_ = fit_scaling(X, self.method)
         return self
 
     def transform(self, X):
-        m = self.mean_
-        if self.method == 'autoscale':
-            return (X - m) / self.std_
-        if self.method == 'pareto':
-            return (X - m) / np.sqrt(self.std_)
-        if self.method == 'range':
-            return (X - m) / self.range_
-        if self.method == 'vast':
-            return ((X - m) / self.std_) * (m / (self.std_ + 1e-10))
-        if self.method == 'level':
-            lvl = np.abs(m); lvl[lvl == 0] = 1
-            return (X - m) / lvl
-        if self.method == 'none':
-            return X - m
-        raise ValueError(f"Unknown scaling: '{self.method}'")
+        return apply_scaling(X, self.method, self.params_)
 
 
 # -- Preprocessor helper -------------------------------------------------------
@@ -377,29 +310,24 @@ def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits,
     return test_acc, train_acc
 
 
-def _run_cv_legacy(model_fn, X, y, n_splits=5, random_state=_SEED):
-    """Original ungrouped CV on an already-preprocessed X. Kept for back-compat."""
-    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    test_accs, train_accs = [], []
-    for train_idx, test_idx in cv.split(X, y):
-        model = model_fn()
-        model.fit(X[train_idx], y[train_idx])
-        train_accs.append(accuracy_score(y[train_idx], model.predict(X[train_idx])))
-        test_accs.append(accuracy_score(y[test_idx],  model.predict(X[test_idx])))
-    return np.array(test_accs), np.array(train_accs)
+def _require_grouped(estimator, X, y, n_splits, groups, prep_steps,
+                     n_repeats=1, return_metrics=False):
+    """Run grouped, leak-free CV — the only supported evaluation path.
 
-
-def _dispatch(estimator, legacy_fn, X, y, n_splits, groups, prep_steps,
-              n_repeats=1, return_metrics=False):
-    if groups is not None and prep_steps is not None:
-        return _run_grouped_cv(estimator, X, y, groups, prep_steps, n_splits,
-                               n_repeats=n_repeats, return_metrics=return_metrics)
-    warnings.warn(
-        "Running LEGACY ungrouped CV on pre-preprocessed X. This reintroduces "
-        "pseudoreplication and preprocessing leakage. Pass groups= and "
-        "prep_steps= (with the binned matrix as X) for corrected estimates.",
-        stacklevel=2)
-    return _run_cv_legacy(legacy_fn, X, y, n_splits)
+    Raises if the caller omits either the colony grouping or the per-fold
+    preprocessor. There is deliberately no ungrouped / pre-preprocessed fallback:
+    the previous legacy branch reintroduced pseudoreplication and preprocessing
+    leakage, so it has been removed rather than left reachable behind a warning.
+    ``X`` must be the RAW binned matrix; all preprocessing is fit inside each fold.
+    """
+    if groups is None or prep_steps is None:
+        raise ValueError(
+            "Grouped, leak-free CV requires both groups= (colony CV groups from "
+            "make_groups) and prep_steps= (per-fold preprocessor from "
+            "make_preprocessor), evaluated on the RAW binned matrix. The legacy "
+            "ungrouped path has been removed.")
+    return _run_grouped_cv(estimator, X, y, groups, prep_steps, n_splits,
+                           n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 # -- Individual classifiers ---------------------------------------------------
@@ -414,8 +342,8 @@ def random_forest(X, y_labels, n_splits=3, groups=None, prep_steps=None,
     g  = small_sample_guards(n_biological)['rf']
     mk = lambda: RandomForestClassifier(n_estimators=100,
                                         random_state=random_state, **g)
-    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
-                     n_repeats=n_repeats, return_metrics=return_metrics)
+    return _require_grouped(mk(), X, y, n_splits, groups, prep_steps,
+                            n_repeats=n_repeats, return_metrics=return_metrics)
 
 # Backward-compatible alias
 RandomForest = random_forest
@@ -427,8 +355,8 @@ def svm_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
     y  = _encode(y_labels)
     g  = small_sample_guards(n_biological)['svm']
     mk = lambda: SVC(kernel='linear', random_state=random_state, **g)
-    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
-                     n_repeats=n_repeats, return_metrics=return_metrics)
+    return _require_grouped(mk(), X, y, n_splits, groups, prep_steps,
+                            n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None,
@@ -439,8 +367,8 @@ def gradient_boosting(X, y_labels, n_splits=3, groups=None, prep_steps=None,
     base = dict(n_estimators=100, learning_rate=0.1, max_depth=3)
     base.update(g)
     mk   = lambda: GradientBoostingClassifier(random_state=random_state, **base)
-    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
-                     n_repeats=n_repeats, return_metrics=return_metrics)
+    return _require_grouped(mk(), X, y, n_splits, groups, prep_steps,
+                            n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None,
@@ -449,8 +377,8 @@ def logistic_regression(X, y_labels, n_splits=3, groups=None, prep_steps=None,
     y  = _encode(y_labels)
     g  = small_sample_guards(n_biological)['logreg']
     mk = lambda: LogisticRegression(max_iter=1000, random_state=random_state, **g)
-    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
-                     n_repeats=n_repeats, return_metrics=return_metrics)
+    return _require_grouped(mk(), X, y, n_splits, groups, prep_steps,
+                            n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
@@ -458,8 +386,8 @@ def lda_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
                  n_biological=None):
     y  = _encode(y_labels)
     mk = lambda: LinearDiscriminantAnalysis()
-    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
-                     n_repeats=n_repeats, return_metrics=return_metrics)
+    return _require_grouped(mk(), X, y, n_splits, groups, prep_steps,
+                            n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
@@ -468,8 +396,8 @@ def ridge_classify(X, y_labels, n_splits=3, groups=None, prep_steps=None,
     y  = _encode(y_labels)
     g  = small_sample_guards(n_biological)['ridge']
     mk = lambda: RidgeClassifier(**g)
-    return _dispatch(mk(), mk, X, y, n_splits, groups, prep_steps,
-                     n_repeats=n_repeats, return_metrics=return_metrics)
+    return _require_grouped(mk(), X, y, n_splits, groups, prep_steps,
+                            n_repeats=n_repeats, return_metrics=return_metrics)
 
 
 # -- Plotting -----------------------------------------------------------------

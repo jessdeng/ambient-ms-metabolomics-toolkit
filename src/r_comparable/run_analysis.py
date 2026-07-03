@@ -40,6 +40,7 @@ from shared.classifier_comparison_standard import grouped_permutation_importance
 from shared.grouping import make_groups, check_batch_confound
 from shared.visualization import plot_spectrum_with_features
 from shared.runtime import resolve_experiment_dir, write_run_manifest
+from shared.reporting import run_quality_control, run_classification_benchmark
 
 BASE_DIR   = _ROOT
 EXPERIMENT = config.EXPERIMENT
@@ -59,6 +60,8 @@ def main():
     # ── Output directory ──────────────────────────────────────────────────────
     out_dir = os.path.join(BASE_DIR, 'results', 'r_comparable')
     os.makedirs(out_dir, exist_ok=True)
+    supp_dir = os.path.join(out_dir, getattr(config, 'SUPPLEMENTARY_SUBDIR',
+                                             'supplementary'))
 
     # C-3: resolve the experiment safely (placeholder/missing -> bundled sample).
     experiment_dir, experiment_name, _used_fallback = resolve_experiment_dir(
@@ -166,8 +169,22 @@ def main():
     print(f"  Scaling        : {_SCALING}")
     X_norm = preprocess(X_filt.copy(), normalization=config.NORMALIZATION,
                         log_transform=_LOG_TRANSFORM, scaling='none')
-    X = preprocess(X_filt, normalization=config.NORMALIZATION,
-                   log_transform=_LOG_TRANSFORM, scaling=_SCALING)
+    # Single staged pass yields both the model matrix (normalised+transformed+scaled)
+    # and the LINEAR normalised matrix (pre-transform) the QC metrics require.
+    _stages = preprocess(X_filt, normalization=config.NORMALIZATION,
+                         log_transform=_LOG_TRANSFORM, scaling=_SCALING,
+                         return_stages=True)
+    X        = _stages['scaled']
+    X_linear = _stages['normalized']
+
+    # ── 4b. Analytical QC (technical %CV, biological %CV, Broadhurst D-ratio) ──
+    if getattr(config, 'RUN_QC_METRICS', False):
+        print("\n[4b] Quality-control metrics (technical %CV, biological %CV, D-ratio)")
+        _qc_table, _qc_summary = run_quality_control(
+            X_linear, mz, groups, y_labels, supp_dir, safe_name, config)
+        print(f"    median technical %CV = {_qc_summary['median_technical_cv_pct']:.1f}%  |  "
+              f"median D-ratio = {_qc_summary['median_dratio_pct']:.1f}%  |  "
+              f"features passing both = {_qc_summary['n_pass_both']}/{_qc_summary['n_features']}")
 
     # ── Leak-free preprocessor for cross-validation ──────────────────────────
     # `groups` / `n_groups` were built and validated in step 1b above.
@@ -269,6 +286,18 @@ def main():
                              out_path=os.path.join(out_dir,
                                  f"classifier_comparison_{safe_name}.png"),
                              chance=1.0 / len(classes))
+
+    # ── 11b. Classification benchmark (pooled leak-free OOF) ──────────────────
+    # Macro-F1, per-class recall/precision and the Analyst-standard confusion
+    # matrix, from pooled out-of-fold predictions on the SAME grouped, per-fold
+    # preprocessing pipeline as the accuracy path (no preprocessing leakage).
+    if getattr(config, 'RUN_CLASSIFICATION_BENCHMARK', False):
+        print("\n[11b] Classification benchmark (macro-F1, per-class recall, confusion matrix)")
+        enabled_names = [name for name, (enabled, _) in all_classifiers.items()
+                         if enabled]
+        run_classification_benchmark(
+            X_binned, y_labels, groups, prep_steps, n_splits,
+            enabled_names, supp_dir, safe_name, experiment_name, config)
 
     # ── 12. Feature Importance (descriptive, full-data) ───────────────────────
     print("\n[12/12] Feature Importance Overlap Analysis")
