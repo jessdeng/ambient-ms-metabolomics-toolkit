@@ -26,9 +26,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
 
-from src.shared.plot_style import apply_style, pub_savefig
 
-apply_style()
 
 # Add repo root to path
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +34,8 @@ _SRC  = os.path.dirname(_HERE)
 _ROOT = os.path.dirname(_SRC)
 sys.path.insert(0, _ROOT)  # config.py lives here
 sys.path.insert(0, _SRC)   # src/ packages take priority
+from shared.plot_style import apply_style, pub_savefig   # after the path setup
+apply_style()
 import config
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -50,7 +50,16 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Find all feature overlap CSVs in the output folder
-    csv_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, 'feature_overlap_*.csv')))
+    # v2: outputs live in results/<pipeline>/<experiment>/; the flat layout is still read.
+    csv_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, '*', 'feature_overlap_*.csv'))
+                       + glob.glob(os.path.join(OUTPUT_DIR, 'feature_overlap_*.csv')))
+    wanted = [a for a in sys.argv[1:] if not a.startswith('-')]
+    if wanted:   # optional: experiment names to plot, in this order
+        by_name = {os.path.basename(f)[len('feature_overlap_'):-4]: f for f in csv_files}
+        missing = [w for w in wanted if w not in by_name]
+        if missing:
+            raise SystemExit(f"No feature_overlap csv for {missing} under {OUTPUT_DIR}")
+        csv_files = [by_name[w] for w in wanted]
 
     if not csv_files:
         print(f"No feature_overlap_*.csv files found in {OUTPUT_DIR}")
@@ -100,7 +109,7 @@ def main():
 
         ax.set_title(name, fontsize=10, fontweight='bold', color='#1a1a1a')
         ax.set_xlabel('Ensemble count (number of methods)', fontsize=8)
-        ax.set_ylabel('PLS-DA VIP score', fontsize=8)
+        ax.set_ylabel('Component-1 VIP', fontsize=8)
         ax.set_xticks([2, 3, 4, 5])
         ax.tick_params(labelsize=8)
         ax.set_xlim(max(0.5, df['n_methods'].min() - 0.5), 6.5)
@@ -129,14 +138,14 @@ def main():
         plt.scatter([], [], s=140, color='grey', alpha=0.6, label='n = 4 methods'),
         plt.scatter([], [], s=220, color='grey', alpha=0.6, label='n = 5 methods'),
         plt.scatter([], [], s=320, color='grey', alpha=0.6, label='n = 6 methods'),
-        mpatches.Patch(color='#FDEBD0', alpha=0.5, label='High confidence, VIP < 1.0'),
+        mpatches.Patch(color='#FDEBD0', alpha=0.5, label='n ≥ 4 methods, component-1 VIP < 1.0'),
         plt.Line2D([0], [0], color='#888888', linestyle='--',
                    linewidth=0.9, label='VIP = 1.0 threshold'),
     ]
     fig.legend(handles=legend_handles, loc='lower center', ncol=3,
                fontsize=8, framealpha=0.9, bbox_to_anchor=(0.5, -0.04))
 
-    fig.suptitle('Ensemble confidence vs. PLS-DA VIP score',
+    fig.suptitle('Ensemble count vs. component-1 PLS-DA VIP',
                  fontsize=12, fontweight='bold', y=1.01)
 
     plt.tight_layout()
