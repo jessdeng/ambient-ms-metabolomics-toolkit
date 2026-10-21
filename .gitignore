@@ -7,9 +7,16 @@ data/*
 results/*
 !results/README.md
 !results/standard/
+results/standard/*
 !results/standard/.gitkeep
 !results/r_comparable/
+results/r_comparable/*
 !results/r_comparable/.gitkeep
+results/validated/
+
+# Manuscript drafts and local configs that may carry private paths
+*.docx
+config.local.json
 
 # Python byte-compiled / optimized / DLL files
 __pycache__/

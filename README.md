@@ -1,315 +1,209 @@
-# Ambient MS Metabolomics Toolkit
+# Ambient MS Metabolomics Toolkit (v2)
 
-A Python pipeline for untargeted ambient mass spectrometry metabolomics. Performs multi-classifier machine learning, ensemble feature importance voting, and cross-validated PLS-DA — with two parallel pipelines: one with data-driven bin labels for accurate compound identification, and one with MetaboAnalyst-offset labels for direct R comparison.
+A Python pipeline for untargeted ambient mass spectrometry metabolomics. It asks a practical question: **when thousands of m/z features are detected, which ones are worth investigating further?** It answers it with complementary, cross-validated analyses:
 
-> **Instrument note:** Default parameters (0.5 Da bins, 100–1000 Da m/z range, TIC normalization) are appropriate for low-resolution ambient MS and direct infusion workflows. Adjust `config.json` for your instrument.
+- unsupervised PCA, to see the dominant structure of the spectra before any labels are used;
+- PLS-DA with VIP, the established reference, reported with explicitly labelled component definitions;
+- six classifiers (Random Forest, linear SVM, Gradient Boosting, Logistic Regression, LDA, Ridge), evaluated with colony-grouped cross-validation;
+- an ensemble feature-importance comparison, reporting where the methods and model families agree and where they disagree.
 
-For detailed notes on parameter choices and output interpretation, see [docs/NOTES.md](docs/NOTES.md).
+Statistical importance is a reason to look at a feature, not proof of its chemical or biological significance. See [Interpreting the results](#interpreting-the-results).
 
----
-
-## Table of Contents
-
-1. [Repository Structure](#repository-structure)
-2. [Quick Start](#quick-start)
-3. [Configuration (config.json)](#configuration-configjson)
-4. [Data Format](#data-format)
-5. [Methodological Note](#methodological-note)
-6. [Which Pipeline?](#which-pipeline)
-7. [Output Files](#output-files)
-8. [Environment Setup](#environment-setup)
-9. [Windows Compatibility](#windows-compatibility)
-10. [Reproducibility](#reproducibility)
-11. [Citation](#citation)
+> **What changed in v2:** see [docs/CHANGES_v2.md](docs/CHANGES_v2.md). The original behaviour is still available as a documented legacy option (`configs/manuscript_original.json`) and in the Git history (`main`).
 
 ---
 
-## Repository Structure
+## Contents
+
+1. [Repository structure](#repository-structure)
+2. [Quick start](#quick-start)
+3. [Your data and metadata](#your-data-and-metadata)
+4. [Settings](#settings)
+5. [What the standard analysis does](#what-the-standard-analysis-does)
+6. [Output files](#output-files)
+7. [Optional validation analyses](#optional-validation-analyses)
+8. [Legacy reproduction of the original results](#legacy-reproduction-of-the-original-results)
+9. [Interpreting the results](#interpreting-the-results)
+10. [Runtime and platform notes](#runtime-and-platform-notes)
+11. [Tests](#tests)
+
+A beginner-friendly, step-by-step guide for macOS is in **[docs/MAC_GUIDE.md](docs/MAC_GUIDE.md)**.
+
+---
+
+## Repository structure
 
 ```
 ambient-ms-metabolomics-toolkit/
 ├── README.md
-├── LICENSE
-├── environment.yml
-├── config.json            ← edit this to configure your experiment
-├── config.py              ← default parameter values (do not edit)
-├── requirements.txt
-├── setup.py
-│
-├── data/                  ← your experiment data goes here (gitignored)
-│   └── <experiment_folder>/
-│       ├── Group1/
-│       └── Group2/
-│
-├── docs/                  ← supplementary documentation
-│   ├── NOTES.md           ← parameter rationale and output interpretation
-│   └── CHANGELOG.md
-│
-├── results/               ← pipeline outputs (gitignored, auto-created on run)
-│   ├── standard/
-│   └── r_comparable/
-│
-└── src/                   ← all source code
-    ├── standard/          ← standard pipeline (data-driven bin labels)
-    │   ├── preprocessing.py
-    │   ├── pipeline.py
-    │   ├── run_analysis.py
-    │   └── extras.py
-    ├── r_comparable/      ← R/MetaboAnalyst-compatible pipeline
-    │   ├── preprocessing.py
-    │   ├── pipeline.py
-    │   ├── run_analysis.py
-    │   └── extras.py
-    ├── shared/            ← modules shared by both pipelines
-    │   ├── classifier_comparison_standard.py
-    │   ├── classifier_comparison.py
-    │   └── visualization.py
-    └── scripts/           ← post-hoc analysis scripts
-        ├── condition_abundance.py
-        ├── condition_spectrum.py
-        └── vip_vs_nmethods.py
+├── environment.yml / requirements.txt   ← pinned, tested dependencies
+├── config.json          ← example settings (runs the bundled demo)
+├── config.py            ← default values for every setting (do not edit)
+├── configs/
+│   ├── standard.json            ← recommended settings for your own data
+│   ├── manuscript_original.json ← legacy: reproduces the original Table 1
+│   └── validation.json          ← settings for the optional validation package
+├── data/                ← your experiment folders (git-ignored); sample_experiment/ is a demo
+├── docs/                ← MAC_GUIDE.md, CHANGES_v2.md, NOTES.md, CHANGELOG*.md
+├── results/             ← outputs (git-ignored), one folder per experiment
+├── src/
+│   ├── standard/        ← standard pipeline (run_analysis.py, extras.py)
+│   ├── r_comparable/    ← MetaboAnalyst-offset bin labels for R comparison
+│   ├── shared/          ← preprocessing, grouping, classifiers, PCA, VIP, statistics
+│   ├── scripts/         ← figure scripts (e.g. vip_vs_nmethods.py)
+│   └── validation/      ← OPTIONAL advanced analyses (stability, sensitivity, ...)
+└── tests/               ← automated tests (pytest)
 ```
 
----
-
-## Quick Start
+## Quick start
 
 ```bash
-# 1. Clone
-git clone https://github.com/<your-username>/ambient-ms-metabolomics-toolkit.git
-cd ambient-ms-metabolomics-toolkit
-
-# 2. Create environment
-conda env create -f environment.yml
-conda activate ambient-ms
-
-# 3. Place your data
-#    data/<EXPERIMENT>/Group1/sample_W1T1.csv
-#    data/<EXPERIMENT>/Group2/sample_W2T1.csv  ...
-
-# 4. Set your experiment name in config.json
-#    { "EXPERIMENT": "<your_experiment_folder>" }
-
-# 5. Run from the repository root (the folder containing config.py)
-python -m src.standard.run_analysis
-
-# Optional: additional plots and permutation test
-python -m src.standard.extras
+conda env create -f environment.yml        # once
+conda activate ms-toolkit
+python src/standard/run_analysis.py --config config.json            # demo data
+python src/standard/run_analysis.py --config configs/standard.json --experiment MY_EXPERIMENT
 ```
 
----
+Results appear in `results/standard/<experiment>/`.
 
-## Configuration (config.json)
+## Your data and metadata
 
-Edit `config.json` in the repository root — no Python editing required:
-
-```json
-{
-  "EXPERIMENT": "my_experiment_folder",
-  "MZ_MIN": 100,
-  "MZ_MAX": 1000,
-  "BIN_WIDTH": 0.5,
-  "NORMALIZATION": "tic",
-  "LOG_TRANSFORM": "glog",
-  "SCALING": "autoscale",
-  "SNR_FLOOR_ENABLED": true,
-  "SNR_THRESHOLD": 3,
-  "NOISE_QUANTILE": 60,
-  "MIN_FRACTION_IN_GROUP": 0.5,
-  "RANDOM_SEED": 42,
-  "RUN_PERMUTATION_TEST": true
-}
-```
-
-Only include the keys you want to change — missing keys fall back to defaults in `config.py`. See `config.py` for the full parameter list and documentation.
-
-**The only required key is `EXPERIMENT`**, which must match the name of your experiment folder inside `data/`.
-
-### Per-pipeline defaults
-
-The two pipelines have different out-of-box defaults for `LOG_TRANSFORM`, `SCALING`, and `SNR_FLOOR_ENABLED`. If you do **not** set these in `config.json`, each pipeline uses its own defaults:
-
-| Key | Standard default | R-comparable default | Reason |
-|-----|-----------------|---------------------|--------|
-| `LOG_TRANSFORM` | `"glog"` | `"log10"` | Standard: arcsinh is linear near zero (suppresses baseline amplification). R-comparable: log10 matches MetaboAnalyst. |
-| `SCALING` | `"autoscale"` | `"autoscale"` | Same for both. |
-| `SNR_FLOOR_ENABLED` | `true` | `false` | Standard: floor on for ambient MS baseline suppression. R-comparable: off to preserve MetaboAnalyst parity. |
-
-If you **do** set any of these in `config.json`, your choice applies to both pipelines.
-
-### New configuration keys
-
-| Key | Default (standard) | Description |
-|-----|--------------------|-------------|
-| `LOG_TRANSFORM` | `"glog"` | Added `"glog"` option: `arcsinh(x / lambda_)` transform. Linear near zero, log-like at high intensity, tolerates exact zeros. `lambda_` is the 5th percentile of positive values, fitted per fold in CV. Existing options `"log10"`, `"log2"`, `"sqrt"`, `"none"` unchanged. |
-| `SNR_FLOOR_ENABLED` | `true` | Enable/disable the SNR intensity floor filter. When `true`, strips bins that never exceed the per-sample noise floor in any condition group. Does **not** remove genuine low-abundance or single-condition features. |
-| `SNR_THRESHOLD` | `3` | Minimum signal-to-noise ratio for a sample to count as a detection within the SNR floor filter. |
-| `NOISE_QUANTILE` | `60` | Percentile of each sample's intensity distribution used to identify the noise region for the MAD noise estimate. |
-| `MIN_FRACTION_IN_GROUP` | `0.5` | Minimum fraction of samples in a group that must meet `SNR_THRESHOLD` for the feature to be retained. Mirrors `PREVALENCE_THRESHOLD` logic. |
-
----
-
-## Data Format
+**Spectra.** Put one folder per experiment under `data/`, with one subfolder per condition (class):
 
 ```
-data/
-└── my_experiment/
-    ├── Control/
-    │   ├── ConditionA_W1T1.csv
-    │   ├── ConditionA_W1T2.csv
-    │   └── ConditionA_W2T1.csv
-    └── Treatment/
-        ├── ConditionB_W3T1.csv
-        └── ConditionB_W3T2.csv
+data/MY_EXPERIMENT/
+├── metadata_manifest.csv      ← recommended: biological replicate (colony) of every file
+├── Control/   ctrl_A1T1.csv  ctrl_A1T2.csv  ctrl_A1T3.csv  ctrl_B1T1.csv ...
+├── Dark/      ...
+└── ...
 ```
 
-**Supported formats:** `.csv` (comma-separated) or `.txt` (tab-separated).
+Each file is one acquisition, with an m/z column and an intensity column (`.csv` comma-separated or `.txt` tab-separated; see [data/README.md](data/README.md)).
 
-**Required columns** (case-insensitive):
+**Biological versus technical replicates.** Cross-validation must keep all technical replicates of one biological replicate (here, a colony) together. Otherwise accuracy is inflated by repeat measurements of the same colony. Colony identity is taken from `metadata_manifest.csv` when that file exists, and from the file names otherwise.
 
-| Column | Accepted names |
-|--------|----------------|
-| m/z | `mz`, `m/z`, `Mass/Charge`, `mass` |
-| Intensity | `int`, `intensity`, `Intensity` |
+Create a template and check it:
 
-**Filename convention for GroupKFold CV:** Use `<prefix><well>T<replicate>.<ext>`, e.g. `ConditionA_W1T1.csv`. The pipeline extracts the well ID (`W1`) and groups all technical replicates of that biological replicate together so they never straddle the train/test boundary. Files not matching this pattern fall back to per-file grouping (no error, but CV is not pseudoreplication-corrected).
+```bash
+python src/shared/grouping.py data/MY_EXPERIMENT     # writes data/MY_EXPERIMENT/metadata_manifest.csv
+```
 
----
+Open the CSV in Excel or Numbers and check, for every file:
+- `class`: the condition;
+- `biological_replicate_group`: the colony / biological replicate (you may name this column `colony`);
+- `technical_replicate`: the repeat number.
 
-## Methodological Note
+Correct anything inferred wrongly from the file names. The pipeline stops with a clear message if a file is missing from the manifest or its class disagrees with its folder. Set `EXPECTED_TECH_REPS` (e.g. `3`) to also stop if any colony has a different number of replicates.
 
-> **Two methodological decisions prevent the most common biases in small-n metabolomics studies. Both are required for a defensible, reproducible analysis.**
+## Settings
 
-### 1. Leave-One-Biological-Replicate-Out Cross-Validation (GroupKFold)
+Copy `configs/standard.json`, set `EXPERIMENT`, and pass it with `--config`. You never need to edit the Python code. Important settings:
 
-**Problem — pseudoreplication:** When technical replicates of the same biological sample are randomly split across folds, the classifier learns the chemical fingerprint of each individual colony rather than generalising across replicates — inflating reported accuracy.
-
-**Solution:** `StratifiedGroupKFold` ensures all technical replicates from one biological replicate are always on the same side of every fold boundary. Groups are `condition::well` (e.g. `Control::W1`), parsed from the filename convention above.
-
-Implemented in `src/shared/classifier_comparison_standard.py` via `make_groups`, `auto_n_splits`, and `_run_grouped_cv`.
-
-### 2. Preprocessing Inside Cross-Validation (sklearn Pipeline)
-
-**Problem — preprocessing leakage:** Fitting variance filters, normalisation, and scaling on the full dataset before CV leaks test-fold information into training, making accuracy appear higher than it is.
-
-**Solution:** All preprocessing is wrapped in an `sklearn.Pipeline` fitted exclusively on the training fold inside each CV iteration. The test fold is transformed using parameters from training data only.
-
-Custom transformers (`VarianceFilter`, `AbundanceFilter`, `Normalizer`, `LogTransform`, `Scaler`) are defined in `src/shared/classifier_comparison_standard.py` and assembled via `make_preprocessor()`.
-
-**Note:** `feature_importance_analysis()` fits on the full preprocessed dataset — this is intentional. It is a descriptive summary of feature drivers, not a generalisation estimate. CV results from `run_analysis.py` provide the generalisation estimate.
-
----
-
-## Which Pipeline?
-
-**If you are not comparing against R-based PLS-DA output, use the standard pipeline.**
-
-| | Standard | R-comparable |
+| Setting | Default | Meaning |
 |---|---|---|
-| **Run** | `python -m src.standard.run_analysis` | `python -m src.r_comparable.run_analysis` |
-| **Extras** | `python -m src.standard.extras` | `python -m src.r_comparable.extras` |
-| **Output** | `results/standard/` | `results/r_comparable/` |
-| **Bin labels** | Mean of actual m/z values in bin | Lower bin edge (MetaboAnalyst convention) |
-| **Default transform** | `glog` (arcsinh) | `log10` (MetaboAnalyst default) |
-| **Default SNR floor** | On (`SNR_FLOOR_ENABLED=true`) | Off (`SNR_FLOOR_ENABLED=false`) |
-| **Use when** | General use, database lookup | Matching R/MetaboAnalyst PLS-DA results |
+| `EXPERIMENT` | — | data folder name under `data/` (or use `--experiment`) |
+| `MZ_MIN`, `MZ_MAX`, `BIN_WIDTH` | 100, 2000, 0.5 | m/z range and bin width (Da) |
+| `SPECTRAL_RESAMPLING` | `native` | `native`: every instrument data point is summed into its bin. `linspace5000`: original 5000-point resampling (legacy) |
+| `NORMALIZATION`, `LOG_TRANSFORM`, `SCALING` | `tic`, `log10`, `autoscale` | preprocessing, refitted inside every CV training fold |
+| `VARIANCE_PERCENTILE`, `ABUNDANCE_PERCENTILE`, `PREVALENCE_THRESHOLD` | 25, 5, 0.5 | feature filters |
+| `CV_FOLDS`, `N_CV_REPEATS` | 5 (auto-reduced to the number of colonies per class), 10 | colony-grouped CV |
+| `TOP_N_FEATURES` | 50 | top-N used for the ensemble count |
+| `PLSDA_VIP_NUM_COMPONENTS` | 1 | component-1 VIP (MetaboAnalyst "Comp. 1" equivalent) |
+| `RUN_MULTICOMPONENT_VIP`, `PLS_MAX_COMPONENTS` | true, 8 | multi-component VIP with A* chosen by grouped Q² |
+| `RUN_PCA`, `RUN_SIGNAL_GROUPS`, `RUN_LOCO_CV` | true | PCA; signal-group annotation; leave-one-colony-out |
+| `METADATA_MANIFEST`, `EXPECTED_TECH_REPS` | `metadata_manifest.csv`, none | replicate metadata |
+| `RUN_FEATURE_STABILITY`, `RUN_OVERLAP_PERMUTATION`, `RUN_PERMUTATION_IMPORTANCE`, `RUN_PLSDA_Q2` | false | slow optional analyses (see below) |
 
-Classifier accuracies and VIP scores are numerically comparable between both versions (bin labels and transforms differ but the pipeline logic is identical). Setting `LOG_TRANSFORM` and `SNR_FLOOR_ENABLED` explicitly in `config.json` applies those values to both pipelines.
+Unknown setting names are reported, not silently ignored.
 
----
+## What the standard analysis does
 
-## Output Files
+1. **Load** the spectra and colony metadata, and check the design (≥2 colonies per class).
+2. **Bin** into 0.5-Da bins (all instrument points summed), then filter the m/z range.
+3. **PCA** (unsupervised). Explained variance, score plots of spectra and colony means, and, for each PC, the share of score variance due to condition-plate, colony (biological) and technical-replicate differences.
+4. **PLS-DA VIP**, two clearly labelled analyses:
+   - (a) **component-1 VIP**, numerically equivalent to MetaboAnalyst's "Comp. 1" VIP;
+   - (b) **multi-component VIP** (Wold PLS2 definition) with A* latent variables. A* is chosen as the argmax of a colony-grouped Q² in which all preprocessing is refitted inside every fold.
+5. **Classification**: six classifiers.
+   - Principal: 3-fold colony-grouped CV (all preprocessing inside the folds), reporting accuracy, balanced accuracy, macro-F1 and confusion matrices.
+   - Supplementary: leave-one-colony-out with pooled predictions.
+6. **Feature importance and consensus.** RF impurity, GB gain, |coefficients| of SVM, LR and Ridge, and component-1 VIP are computed on all data. For each feature the outputs are:
+   - `n_methods`: the original ensemble count of top-N memberships among these six;
+   - model-family support: linear (SVM/LR/Ridge), tree (RF/GB) and PLS (VIP), with `n_families`, because the three linear models give closely related solutions;
+   - multi-component VIP rank;
+   - a descriptive univariate screen on colony means.
+7. **Signal groups.** Adjacent 0.5-Da bins whose colony-mean profiles co-vary and whose raw profile shows a single peak are annotated as one spectral signal (e.g. bins 159.5–160.0 and 160.0–160.5 → one signal near m/z 160.1). Features stay 0.5-Da bins. The grouping is an annotation for interpretation and never silently merges features.
 
-Outputs are saved to `results/standard/` or `results/r_comparable/`.
+## Output files
 
-| File | Description |
-|------|-------------|
-| `plsda_scores_3d_<exp>.html` | Interactive 3D PLS-DA scores plot (open in browser) |
-| `vip_scores_<exp>.png` | Top VIP features with per-group intensity heatmap |
-| `classifier_comparison_<exp>.png` | Per-fold accuracy for all 6 classifiers |
-| `spectrum_features_<exp>.png` | Mean spectrum per group with ensemble features marked |
-| `feature_overlap_<exp>.csv` | Ensemble candidates with per-group means, Ridge coefficients, VIP scores |
-| `classifier_results_<exp>.npz` | Saved CV accuracy arrays (auto-loaded by extras.py) |
-| `summary_<exp>.txt` | Plain-text run summary (extras.py) |
-| `variation_<exp>.png` | Within-group feature RSD violin plot (extras.py) |
-| `correlation_<exp>.png` | Pairwise correlation of top VIP features (extras.py) |
-| `permutation_test_<exp>.png` | Null distribution vs observed accuracy (extras.py) |
-| `permutation_null_<exp>.npy` | Raw permutation accuracy array (extras.py) |
+All in `results/standard/<experiment>/`:
 
-### Post-hoc scripts
+| File | Content |
+|---|---|
+| `classifier_accuracy_<exp>.csv` | principal table: 3-fold grouped CV mean ± SD, LOCO accuracy / balanced accuracy / macro-F1, chance level, numbers of spectra and colonies |
+| `classifier_comparison_<exp>.png` | accuracy per fold, train vs test |
+| `feature_rankings_<exp>.csv` | **every** feature: importance and rank per method, top-N membership, `n_methods`, family support, multi-component VIP, signal group |
+| `feature_overlap_<exp>.csv` | candidates with ≥2 votes, plus univariate effect sizes and condition means |
+| `vip_<exp>.csv`, `vip_scores_<exp>.png` | component-1 and multi-component VIP |
+| `plsda_q2_profile_<exp>.csv` | grouped Q² for 1–8 latent variables (A* = argmax) |
+| `pca_<exp>.png`, `pca_explained_variance_<exp>.csv`, `pca_scores_<exp>.csv`, `pca_top_loadings_<exp>.csv` | PCA |
+| `signal_groups_<exp>.csv` | bin → signal-group map (evidence in `supplementary/`) |
+| `spectrum_features_<exp>.png` | condition-mean spectra with candidate features marked |
+| `model_importance_correlation_<exp>.csv` | Spearman correlation between methods' importances |
+| `supplementary/` | confusion matrices, classification metrics, QC (technical %CV, technical/total SD ratio) |
+| `run_manifest.json` | settings, package versions, Git commit and input files of the run |
 
-Run after `run_analysis.py`. Set `PIPELINE = 'standard'` or `'r_comparable'` at the top of each script.
+**Multi-experiment figures** (after the standard analysis has been run for each experiment):
 
 ```bash
-python -m src.scripts.condition_abundance
-python -m src.scripts.vip_vs_nmethods
-python -m src.scripts.condition_spectrum
+python src/scripts/pca_overview.py experiment_a experiment_b experiment_c experiment_d      # PCA overview -> results/standard/pca_overview.png
+python src/scripts/vip_vs_nmethods.py experiment_a experiment_b experiment_c experiment_d   # ensemble count vs component-1 VIP -> results/standard/vip_vs_nmethods.png
 ```
 
----
+## Optional validation analyses
 
-## Environment Setup
-
-### Option A — conda (recommended)
+These analyses are slow (minutes to hours) and are **never run by default**. They were used to validate the feature prioritisation reported in the manuscript.
 
 ```bash
-conda env create -f environment.yml
-conda activate ambient-ms
+python src/standard/extras.py --config configs/standard.json --experiment MY_EXPERIMENT   # exploratory permutation test, VIP-filtered classifiers (nested)
+PYTHONPATH=src:. python -m validation.run_stability   --isolate MY_EXPERIMENT --design oa27    # colony-removal selection stability
+PYTHONPATH=src:. python -m validation.run_technical   --isolate MY_EXPERIMENT                  # technical-replicate stability
+PYTHONPATH=src:. python -m validation.run_sensitivity --isolates MY_EXPERIMENT                 # preprocessing / binning sensitivity
+PYTHONPATH=src:. python -m validation.run_unsupervised --isolates MY_EXPERIMENT                # extended PCA diagnostics
 ```
 
-### Option B — pip
+**Prerequisites (v2 limitation).** `run_sensitivity`, `run_classification` and `run_benchmark` are self-contained. `run_stability`, `run_technical` and `run_agreement` (and the importance-dependent parts of `run_unsupervised`) read the per-isolate importance tables and the grouped-Q² A* table in `results/validation/step4_importance/`. The scripts that generate those tables have not yet been ported to this release (see docs/CHANGES_v2.md, "Remaining limitations").
+
+Shuffled-label analyses report **exceedance proportions** (the share of shuffles reaching the observed value), never p-values. See below.
+
+## Legacy reproduction of the original results
 
 ```bash
-python setup.py
-# or directly:
-pip install -r requirements.txt
+python src/standard/run_analysis.py --config configs/manuscript_original.json --experiment MY_EXPERIMENT
 ```
 
-**Python version:** 3.11 tested and recommended. Python 3.9+ should work.
+This uses the original 5000-point resampling and file-name grouping, with no v2 additions. It reproduced 16 of 18 published Table 1 entries exactly from the original spectra (requires scikit-learn ≥ 1.8; see docs/CHANGES_v2.md).
 
----
+## Interpreting the results
 
-## Windows Compatibility
+- **Importance ≠ reproducibility ≠ chemical significance.** A high rank says a feature helps a model separate the conditions in this data set. Whether the signal is reproducible needs replicate, stability and spectral checks. Whether it means anything chemically needs identification (high-resolution MS, MS/MS, standards). At unit resolution, nominal m/z does not identify a compound.
+- **Agreement between methods is not proof.** The linear models are closely related, so several votes can come from one underlying solution. Report family support alongside `n_methods`.
+- **Design limits.** If each condition was grown on a single plate or enclosure, condition and plate effects cannot be separated, and condition differences are condition-plate associations. Shuffling labels between colonies then does not give a valid significance test, so shuffled-label results are exploratory exceedance proportions.
+- **Effective sample size** is the number of biological replicates (colonies), not the number of spectra.
 
-All file paths use `os.path.join()` — no hardcoded forward slashes. All dependencies are cross-platform.
+## Runtime and platform notes
 
-**Running on Windows (CMD or PowerShell):**
+Measured on macOS (8-core laptop, 16 GB RAM), single-threaded:
 
-```cmd
-:: Navigate to the repo root
-cd C:\path\to\ambient-ms-metabolomics-toolkit
+| Data set | Standard analysis | Peak memory |
+|---|---|---|
+| bundled demo (12 spectra) | 7 s | — |
+| one isolate: 45 spectra, 19,001 points each, m/z 100–2000 | 89–105 s | 570–700 MiB |
 
-:: Create and activate environment
-conda env create -f environment.yml
-conda activate ambient-ms
+On macOS, set `export VECLIB_MAXIMUM_THREADS=1 OMP_NUM_THREADS=1` before running several analyses at once. Otherwise Apple's Accelerate library starts extra threads in every process and the machine slows down. Windows and Linux should work but were not tested for v2.
 
-:: Run the pipeline (always from repo root)
-python -m src.standard.run_analysis
-python -m src.standard.extras
+## Tests
+
+```bash
+python -m pytest -q        # 299 tests, about 10 s
 ```
-
-**Important:** Always run `python -m` commands from the **repository root directory** (the folder containing `config.py`). All terminal output uses ASCII characters only — no `PYTHONIOENCODING` changes required.
-
----
-
-## Reproducibility
-
-All stochastic classifiers use `RANDOM_SEED = 42` (set in `config.json` or `config.py`). To verify robustness, change this value and re-run — key findings should not change substantially.
-
-```json
-{ "RANDOM_SEED": 99 }
-```
-
-To reproduce results from the paper exactly, keep all `config.json` values at their defaults.
-
----
-
-## Citation
-
-If you use this toolkit in your research, please cite:
-
-> [Citation to be added upon publication]
-
-For the scaling method comparison informing default parameter selection:
-
-> van den Berg, R.A., Hoefsloot, H.C., Westerhuis, J.A., Smilde, A.K., & van der Werf, M.J. (2006). Centering, scaling, and transformations: improving the biological information content of metabolomics data. *BMC Genomics*, 7, 142. https://doi.org/10.1186/1471-2164-7-142

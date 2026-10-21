@@ -36,7 +36,19 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score
 
+if __name__ == '__main__':
+    import argparse as _ap
+    _p = _ap.ArgumentParser(description='Optional extras (exploratory permutation test, VIP-filtered classifiers, ...).')
+    _p.add_argument('--config'); _p.add_argument('--experiment')
+    _a, _ = _p.parse_known_args()
+    if _a.config:
+        os.environ['TOOLKIT_CONFIG'] = os.path.abspath(_a.config)
+    if _a.experiment:
+        os.environ['TOOLKIT_EXPERIMENT'] = _a.experiment
+
 import config
+if os.environ.get('TOOLKIT_EXPERIMENT'):
+    config.EXPERIMENT = os.environ['TOOLKIT_EXPERIMENT']
 from standard.preprocessing import (
     load_experiment, bin_features, filter_mass_range,
     filter_low_variance, filter_low_abundance, preprocess
@@ -48,7 +60,7 @@ from shared.classifier_comparison_standard import (
     feature_importance_analysis,
     make_preprocessor, auto_n_splits,
 )
-from shared.grouping import make_groups, permute_labels_by_group, check_batch_confound
+from shared.grouping import make_groups, permute_labels_by_group, check_batch_confound, resolve_groups
 
 BASE_DIR = _ROOT
 
@@ -74,8 +86,9 @@ def _load_and_preprocess(experiment_name):
 
     # validate=False + explicit enforce so the post-hoc scripts fail fast with the
     # SAME word-for-word n=1 confound error as run_analysis (cross-entry parity).
-    X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir,
-                                                        validate=False)
+    X_raw, y_labels, sample_names, mz = load_experiment(
+        experiment_dir, validate=False,
+        resample=getattr(config, 'SPECTRAL_RESAMPLING', 'linspace5000'))
     check_batch_confound(y_labels,
                          make_groups(y_labels, sample_names, validate=False),
                          names=sample_names, enforce=True)
@@ -165,9 +178,9 @@ def run_summary_report(X, y_labels, mz, safe_name, out_dir, classifier_results=N
             lines.append(f"  {name:22s}  test={test_accs.mean():.3f} +/- {test_accs.std():.3f}  "
                          f"train={train_accs.mean():.3f} +/- {train_accs.std():.3f}")
         else:
-            test_accs, train_accs = fn(X, y_labels, n_splits=config.CV_FOLDS)
-            lines.append(f"  {name:22s}  test={test_accs.mean():.3f} +/- {test_accs.std():.3f}  "
-                         f"train={train_accs.mean():.3f} +/- {train_accs.std():.3f}")
+            # v2: no ungrouped fallback CV here (it would ignore colony structure and
+            # fit preprocessing outside the folds). Use the grouped results.
+            lines.append(f"  {name:22s}  [not computed - run run_analysis.py first]")
 
     lines.append("\n-- Output Files ------------------------------------------------")
     output_patterns = [
@@ -267,10 +280,10 @@ def run_cross_experiment_comparison(out_dir):
     safe_b = config.EXPERIMENT_B.strip().replace(' ', '_').replace(':', '')
 
     print(f"  Loading experiment A: {config.EXPERIMENT_A!r}")
-    X_a, y_a, mz_a, _ = _load_and_preprocess(config.EXPERIMENT_A)
+    X_a, y_a, mz_a = _load_and_preprocess(config.EXPERIMENT_A)[:3]
 
     print(f"  Loading experiment B: {config.EXPERIMENT_B!r}")
-    X_b, y_b, mz_b, _ = _load_and_preprocess(config.EXPERIMENT_B)
+    X_b, y_b, mz_b = _load_and_preprocess(config.EXPERIMENT_B)[:3]
 
     print("  Computing top features for experiment A...")
     overlap_a, _ = feature_importance_analysis(X_a, y_a, mz_a, safe_a + '_comparison', out_dir,
@@ -319,9 +332,14 @@ def run_cross_experiment_comparison(out_dir):
 
 def run_reproducibility_report(X, y_labels, mz, safe_name, out_dir):
     """
-    Runs Random Forest and Logistic Regression twice with different random seeds
-    and reports what fraction of top features are consistent across both runs.
-    A high overlap means the feature rankings are stable and trustworthy.
+    Seed sensitivity of each model's top-N feature set (seed 42 vs seed 99).
+
+    Corrected: (i) Gradient Boosting, the most seed-sensitive model, is included;
+    (ii) models whose solver ignores the seed on fixed data (Ridge, linear SVM,
+    lbfgs logistic regression) are reported as 'seed-independent' instead of a
+    trivially perfect stability; (iii) binary designs, where ``coef_`` has a
+    single row, are handled (previously Ridge was reduced to one feature).
+    Seed stability is NOT stability under resampling of colonies or replicates.
     """
     top_n = config.TOP_N_FEATURES
     le = LabelEncoder()
@@ -329,73 +347,86 @@ def run_reproducibility_report(X, y_labels, mz, safe_name, out_dir):
 
     results = []
     for name, ModelClass, kwargs in [
-        ('Random Forest',       RandomForestClassifier,  {'n_estimators': 100}),
-        ('Logistic Regression', LogisticRegression,      {'max_iter': 1000}),
-        ('Ridge',               RidgeClassifier,         {}),
-        ('SVM',                 SVC,                     {'kernel': 'linear'}),
+        ('Random Forest',       RandomForestClassifier,      {'n_estimators': 100}),
+        ('Gradient Boosting',   GradientBoostingClassifier,  {'n_estimators': 100, 'learning_rate': 0.1, 'max_depth': 3}),
+        ('Logistic Regression', LogisticRegression,          {'max_iter': 1000}),
+        ('Ridge',               RidgeClassifier,             {}),
+        ('SVM',                 SVC,                         {'kernel': 'linear'}),
     ]:
-        model_a = ModelClass(random_state=42, **kwargs)
-        model_b = ModelClass(random_state=99, **kwargs)
-        model_a.fit(X, y)
-        model_b.fit(X, y)
-
+        model_a = ModelClass(random_state=42, **kwargs).fit(X, y)
+        model_b = ModelClass(random_state=99, **kwargs).fit(X, y)
         if hasattr(model_a, 'feature_importances_'):
-            imp_a = model_a.feature_importances_
-            imp_b = model_b.feature_importances_
+            imp_a, imp_b = model_a.feature_importances_, model_b.feature_importances_
         else:
-            imp_a = np.abs(model_a.coef_).mean(axis=0)
-            imp_b = np.abs(model_b.coef_).mean(axis=0)
-
+            imp_a = np.abs(np.atleast_2d(model_a.coef_)).mean(axis=0)
+            imp_b = np.abs(np.atleast_2d(model_b.coef_)).mean(axis=0)
         top_a = set(np.argsort(imp_a)[::-1][:top_n])
         top_b = set(np.argsort(imp_b)[::-1][:top_n])
         overlap = len(top_a & top_b)
-        stability = overlap / top_n * 100
-
-        results.append({
-            'Model': name,
-            f'Top {top_n} overlap (%)': f"{stability:.1f}%",
-            'Shared features': overlap,
-        })
-        print(f"  {name:22s}  {stability:.1f}% of top {top_n} features stable across seeds")
+        deterministic = bool(np.allclose(imp_a, imp_b))
+        label = 'seed-independent (identical fits)' if deterministic else f"{overlap / top_n * 100:.1f}%"
+        results.append({'Model': name, f'Top {top_n} overlap (%)': label, 'Shared features': overlap,
+                        'Seed-dependent': not deterministic})
+        print(f"  {name:22s}  {label} of top {top_n} features shared between seeds 42 and 99")
 
     df = pd.DataFrame(results)
     out_path = os.path.join(out_dir, f"reproducibility_{safe_name}.csv")
     df.to_csv(out_path, index=False, encoding='utf-8')
     print(f"  Saved -> {out_path}")
+    return df
 
 
 # -- 6. VIP-Based Feature Selection ----------------------------------------------
 
-def run_vip_filtered_classifiers(X, y_labels, mz, safe_name, out_dir, vip_threshold=1.0):
-    """
-    Connects the PLS-DA and ML steps by using VIP scores to gate which
-    features enter the classifiers. Reduces dimensionality to biologically
-    meaningful features, addressing overfitting in high-dimensional MS data.
+class VIPFilter:
+    """Keep features with component-1 VIP > threshold, computed on the data the
+    filter is fitted to. Used as the last preprocessing step inside a CV
+    pipeline so that selection never sees the held-out fold."""
 
-    Runs all enabled classifiers on VIP-filtered data and compares accuracy
-    to the full-feature results.
+    def __init__(self, threshold=1.0, min_features=2):
+        self.threshold = threshold
+        self.min_features = min_features
+
+    def get_params(self, deep=True):
+        return {'threshold': self.threshold, 'min_features': self.min_features}
+
+    def set_params(self, **p):
+        for k, v in p.items():
+            setattr(self, k, v)
+        return self
+
+    def fit(self, X, y=None):
+        vip = compute_vip_1comp(X, y)
+        keep = vip > self.threshold
+        if keep.sum() < self.min_features:
+            keep = np.zeros(len(vip), dtype=bool); keep[np.argsort(vip)[::-1][:self.min_features]] = True
+        self.keep_ = keep
+        return self
+
+    def transform(self, X):
+        return X[:, self.keep_]
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X, y).transform(X)
+
+
+def run_vip_filtered_classifiers(X_cv, y_labels, groups, prep_steps, safe_name, out_dir,
+                                 vip_threshold=1.0, n_splits=3, n_repeats=1):
+    """
+    Classifier accuracy when features are restricted to component-1 VIP > threshold.
+
+    Corrected (manuscript section 3.3): the previous version computed VIP on all
+    labelled spectra BEFORE cross-validation (selection bias) and called the
+    classifiers without the grouped, in-pipeline CV they require (ValueError).
+    VIP selection is now nested: it is refitted inside every training fold after
+    the leak-free preprocessing, with colony-grouped folds.
     """
     from shared.classifier_comparison_standard import (
         RandomForest, svm_classify, gradient_boosting,
         logistic_regression, lda_classify, ridge_classify,
         plot_accuracy_comparison
     )
-
-    # Compute VIP and filter
-    vip = compute_vip_1comp(X, y_labels)
-    keep = vip > vip_threshold
-    n_kept = keep.sum()
-    n_total = len(keep)
-
-    print(f"  VIP filter (threshold={vip_threshold}): keeping {n_kept} of {n_total} features")
-
-    if n_kept < 2:
-        print("  [warning] Fewer than 2 features passed VIP filter -- skipping.")
-        return
-
-    X_filt = X[:, keep]
-
-    # Run classifiers on filtered data
+    nested = list(prep_steps) + [('vip_filter', VIPFilter(threshold=vip_threshold))]
     classifier_fns = {
         'Random Forest':       (config.USE_RANDOM_FOREST,       RandomForest),
         'SVM':                 (config.USE_SVM,                 svm_classify),
@@ -404,30 +435,25 @@ def run_vip_filtered_classifiers(X, y_labels, mz, safe_name, out_dir, vip_thresh
         'LDA':                 (config.USE_LDA,                 lda_classify),
         'Ridge':               (config.USE_RIDGE,               ridge_classify),
     }
-
     results = {}
     for name, (enabled, fn) in classifier_fns.items():
         if enabled:
             print(f"    {name}...")
-            results[name] = fn(X_filt, y_labels, n_splits=config.CV_FOLDS)
-
-    # Plot
+            results[name] = fn(X_cv, y_labels, n_splits=n_splits, groups=groups,
+                               prep_steps=nested, n_repeats=n_repeats)
     plot_path = os.path.join(out_dir, f"vip_filtered_classifiers_{safe_name}.png")
-    plot_accuracy_comparison(results, f"{config.EXPERIMENT} (VIP-filtered)", plot_path)
-
-    # Print comparison summary
-    print(f"\n  Results on VIP-filtered features ({n_kept} features, VIP > {vip_threshold}):")
+    plot_accuracy_comparison(results, f"{config.EXPERIMENT} (VIP > {vip_threshold}, nested)", plot_path)
+    print(f"\n  Nested VIP-filtered results (VIP > {vip_threshold}, refitted per training fold):")
     for name, (test_accs, train_accs) in results.items():
         gap = train_accs.mean() - test_accs.mean()
         print(f"    {name:22s}  test={test_accs.mean():.3f}  train={train_accs.mean():.3f}  gap={gap:.3f}")
-
     return results
 
 
 # -- 7. Permutation Testing ------------------------------------------------------
 
 def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
-                         n_permutations=100, random_state=None):
+                         n_permutations=100, random_state=None, groups=None):
     """
     Validates that classification is significantly above chance by shuffling
     class labels n_permutations times and comparing to the observed accuracy.
@@ -452,7 +478,14 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     meant to retain. The shuffle happens OUTSIDE the pipeline so each permutation
     re-runs the full grouped, leak-free procedure.
 
-    Uses Random Forest as the reference classifier.
+    The classifier is pre-specified with ``PERMUTATION_CLASSIFIER`` (default
+    'Random Forest'); it must not be chosen after seeing which model scored best.
+
+    Interpretation (v2): each condition was grown on one plate/enclosure, so
+    colonies are not exchangeable between conditions under a no-light-effect
+    hypothesis. The result is therefore reported as an exploratory exceedance
+    proportion (share of shuffles reaching the observed accuracy), not as a
+    p-value or a significance test.
     """
     import warnings
     if random_state is None:
@@ -460,7 +493,8 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
 
     os.makedirs(out_dir, exist_ok=True)
 
-    groups     = make_groups(y_labels, sample_names)
+    if groups is None:
+        groups = make_groups(y_labels, sample_names)
     prep_steps = make_preprocessor(
         normalization=config.NORMALIZATION, log_transform=config.LOG_TRANSFORM,
         scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
@@ -477,11 +511,21 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
     n_splits  = auto_n_splits(y_labels, groups, desired=config.CV_FOLDS)
     n_repeats = getattr(config, 'N_CV_REPEATS', 1)
 
-    obs_test, _ = RandomForest(X_binned, y_labels, n_splits=n_splits,
-                               groups=groups, prep_steps=prep_steps,
-                               n_repeats=n_repeats, random_state=random_state)
+    from shared.classifier_comparison_standard import (svm_classify, gradient_boosting,
+                                                       logistic_regression, lda_classify,
+                                                       ridge_classify)
+    _fns = {'Random Forest': RandomForest, 'SVM': svm_classify,
+            'Gradient Boosting': gradient_boosting, 'Logistic Regression': logistic_regression,
+            'LDA': lda_classify, 'Ridge': ridge_classify}
+    clf_name = getattr(config, 'PERMUTATION_CLASSIFIER', 'Random Forest')
+    if clf_name not in _fns:
+        raise ValueError(f"PERMUTATION_CLASSIFIER must be one of {sorted(_fns)}, got {clf_name!r}")
+    clf_fn = _fns[clf_name]
+    obs_test, _ = clf_fn(X_binned, y_labels, n_splits=n_splits,
+                         groups=groups, prep_steps=prep_steps,
+                         n_repeats=n_repeats, random_state=random_state)
     real_score = float(obs_test.mean())
-    print(f"  Observed accuracy (Random Forest, grouped CV): {real_score:.3f}")
+    print(f"  Observed accuracy ({clf_name}, pre-specified; grouped CV): {real_score:.3f}")
     print(f"  Running {n_permutations} permutations (grouped, in-pipeline) ...")
 
     rng = np.random.default_rng(random_state)
@@ -493,7 +537,7 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                perm_test, _ = RandomForest(X_binned, y_perm, n_splits=n_splits,
+                perm_test, _ = clf_fn(X_binned, y_perm, n_splits=n_splits,
                                             groups=groups, prep_steps=prep_steps,
                                             n_repeats=n_repeats,
                                             random_state=random_state + i + 1)
@@ -505,12 +549,13 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
 
     perm_scores = np.array(perm_scores)
     valid = ~np.isnan(perm_scores)
-    # +1/+1 (Phipson & Smyth 2010): a permutation p-value must never be 0.
+    # Exceedance proportion with the +1/+1 convention (never exactly 0).
     pvalue = ((perm_scores[valid] >= real_score).sum() + 1) / (valid.sum() + 1)
 
     print(f"  Permutation mean accuracy: {perm_scores[valid].mean():.3f} +/- "
           f"{perm_scores[valid].std():.3f}")
-    print(f"  p-value: {pvalue:.4f} {'significant' if pvalue < 0.05 else 'not significant'}")
+    print(f"  Exceedance proportion: {pvalue:.3f} (exploratory; condition and plate are "
+          f"aliased, so this is not a p-value)")
 
     # Plot
     fig, ax = plt.subplots(figsize=(8, 4), dpi=300)
@@ -522,7 +567,8 @@ def run_permutation_test(X_binned, y_labels, sample_names, safe_name, out_dir,
                linestyle='--', label=f'Permutation mean = {perm_scores[valid].mean():.3f}')
     ax.set_xlabel('Grouped-CV Accuracy')
     ax.set_ylabel('Count')
-    ax.set_title(f'Permutation Test (grouped, leak-free) -- {config.EXPERIMENT}\np = {pvalue:.4f}')
+    ax.set_title(f'Colony-level shuffled labels ({clf_name}) -- {config.EXPERIMENT}\n'
+                 f'exceedance proportion = {pvalue:.3f} (exploratory)')
     ax.legend(fontsize=9)
     plt.tight_layout()
 
@@ -541,7 +587,7 @@ def main():
     safe_name = experiment_name.replace(' ', '_').replace(':', '')
 
     # -- Output directory --------------------------------------------------------
-    out_dir = os.path.join(BASE_DIR, 'results', 'standard')
+    out_dir = os.path.join(BASE_DIR, 'results', 'standard', safe_name, 'extras')
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"\nLoading data for: {experiment_name!r}")
@@ -550,7 +596,9 @@ def main():
     print(f"  {X.shape[0]} samples, {X.shape[1]} features")
 
     # Grouping + leak-free preprocessor reused by the fallback CV below.
-    groups     = make_groups(y_labels, sample_names)
+    groups     = resolve_groups(y_labels, sample_names, _exp_dir,
+                                getattr(config, 'METADATA_MANIFEST', None),
+                                getattr(config, 'EXPECTED_TECH_REPS', None))
     prep_steps = make_preprocessor(
         normalization=config.NORMALIZATION, log_transform=config.LOG_TRANSFORM,
         scaling=config.SCALING, variance_percentile=config.VARIANCE_PERCENTILE,
@@ -620,8 +668,8 @@ def main():
     if config.RUN_VIP_FILTERED_CLASSIFIERS:
         print("\n[Extras] VIP-Filtered Classifier Comparison")
         run_vip_filtered_classifiers(
-            X, y_labels, mz, safe_name, out_dir,
-            vip_threshold=config.VIP_FILTER_THRESHOLD
+            X_cv, y_labels, groups, prep_steps, safe_name, out_dir,
+            vip_threshold=config.VIP_FILTER_THRESHOLD, n_splits=n_splits, n_repeats=n_repeats
         )
 
     if config.RUN_PERMUTATION_TEST:
@@ -629,7 +677,7 @@ def main():
               f"grouped + in-pipeline)")
         run_permutation_test(
             X_cv, y_labels, sample_names, safe_name, out_dir,
-            n_permutations=config.N_PERMUTATIONS
+            n_permutations=config.N_PERMUTATIONS, groups=groups
         )
 
     print("\nDone.")

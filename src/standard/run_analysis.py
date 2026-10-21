@@ -7,12 +7,34 @@ _ROOT = os.path.dirname(_SRC)                                           # repo r
 sys.path.insert(0, _ROOT)  # config.py lives here
 sys.path.insert(0, _SRC)   # standard/, shared/ live here (checked first)
 
+
+def _parse_cli():
+    """`--config FILE` selects the settings file (default: ./config.json);
+    `--experiment NAME` overrides EXPERIMENT. Must run before `import config`."""
+    import argparse
+    ap = argparse.ArgumentParser(description='Standard analysis (ambient MS metabolomics toolkit).')
+    ap.add_argument('--config', help='JSON settings file (default: config.json in the repository root)')
+    ap.add_argument('--experiment', help='data folder name under data/ (overrides EXPERIMENT)')
+    a, _ = ap.parse_known_args()
+    if a.config:
+        os.environ['TOOLKIT_CONFIG'] = os.path.abspath(a.config)
+    if a.experiment:
+        os.environ['TOOLKIT_EXPERIMENT'] = a.experiment
+
+
+if __name__ == '__main__':
+    _parse_cli()
+
+import time
 import matplotlib
 matplotlib.use('Agg')
 
 import numpy as np
+import pandas as pd
 
 import config
+if os.environ.get('TOOLKIT_EXPERIMENT'):
+    config.EXPERIMENT = os.environ['TOOLKIT_EXPERIMENT']
 from standard.preprocessing import (load_experiment, bin_features,
     filter_mass_range, filter_snr_floor, filter_prevalence,
     filter_low_variance, filter_low_abundance, preprocess)
@@ -25,27 +47,33 @@ from shared.classifier_comparison_standard import (
     plot_accuracy_comparison, feature_importance_analysis,
     make_preprocessor, auto_n_splits, grouped_permutation_importance,
 )
-from shared.grouping import make_groups, check_batch_confound
+from shared.grouping import make_groups, check_batch_confound, resolve_groups
 from shared.visualization import plot_spectrum_with_features
 from shared.runtime import resolve_experiment_dir, write_run_manifest
 from shared.reporting import run_quality_control, run_classification_benchmark
+from shared.pca import run_pca
+from shared.loco_cv import loco_table
 
 BASE_DIR   = _ROOT
 EXPERIMENT = config.EXPERIMENT
 
 
 def main():
-    out_dir = os.path.join(BASE_DIR, 'results', 'standard')
+    t_start = time.time()
+    # Resolve the experiment folder; an invalid EXPERIMENT raises a clear error
+    # (the original silent fallback to the sample data needs ALLOW_SAMPLE_FALLBACK).
+    experiment_dir, experiment_name, _used_fallback = resolve_experiment_dir(
+        BASE_DIR, config.EXPERIMENT)
+    experiment_name = experiment_name.strip()
+    safe_name       = experiment_name.replace(' ', '_').replace(':', '')
+
+    # v2: one output folder per experiment: results/standard/<experiment>/
+    out_dir = os.path.join(BASE_DIR, 'results', 'standard', safe_name)
     os.makedirs(out_dir, exist_ok=True)
     supp_dir = os.path.join(out_dir, getattr(config, 'SUPPLEMENTARY_SUBDIR',
                                              'supplementary'))
-
-    # C-3: resolve the experiment safely — placeholder or missing EXPERIMENT
-    # falls back to the bundled sample experiment instead of crashing.
-    experiment_dir, experiment_name, _used_fallback = resolve_experiment_dir(
-        BASE_DIR, EXPERIMENT)
-    experiment_name = experiment_name.strip()
-    safe_name       = experiment_name.replace(' ', '_').replace(':', '')
+    print(f"  Settings file : {getattr(config, 'CONFIG_FILE', 'config.json')}")
+    print(f"  Output folder : {out_dir}")
 
     # Provenance: capture environment + parameters for this run.
     write_run_manifest(out_dir, BASE_DIR, config_module=config,
@@ -56,8 +84,12 @@ def main():
     print(f"\n[1/12] Loading data: {experiment_name!r}")
     # validate=False: defer the in-loader pre-flight so the explicit confound
     # guardrail below owns the failure message (clear n=1 explanation).
+    _resample = getattr(config, 'SPECTRAL_RESAMPLING', 'linspace5000')
     X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir,
-                                                        validate=False)
+                                                        validate=False,
+                                                        resample=_resample)
+    raw_mz_grid = np.asarray(mz, float)
+    print(f"  Spectral grid: {_resample!r} ({raw_mz_grid.size} points per spectrum)")
     print(f"  Raw samples : {X_raw.shape[0]}")
     print(f"  Raw features: {X_raw.shape[1]}")
 
@@ -65,7 +97,9 @@ def main():
     # Build the leave-one-biological-replicate-out groups now (single source of
     # truth, reused below) and HARD-FAIL on an n=1 design so cross-validation can
     # never emit a misleading ~1.0 score on a confounded study.
-    groups   = make_groups(y_labels, sample_names, validate=False)
+    groups   = resolve_groups(y_labels, sample_names, experiment_dir,
+                              getattr(config, 'METADATA_MANIFEST', None),
+                              getattr(config, 'EXPECTED_TECH_REPS', None))
     n_groups = len(set(groups))
     n_classes = int(np.unique(y_labels).size)
     check_batch_confound(y_labels, groups, names=sample_names, enforce=True)
@@ -165,15 +199,25 @@ def main():
     X        = _stages['scaled']
     X_linear = _stages['normalized']
 
-    # -- 4b. Analytical QC (technical %CV, biological %CV, Broadhurst D-ratio) ----
+    # -- 4a. PCA (unsupervised; v2) ---------------------------------------------
+    if getattr(config, 'RUN_PCA', True):
+        print("\n[4a] PCA (unsupervised; labels used only to describe the fitted structure)")
+        _ev = run_pca(X, y_labels, groups, mz, sample_names, out_dir, safe_name,
+                      experiment_name, n_components=getattr(config, 'N_PCA_COMPONENTS', 5))
+        for _, r in _ev.head(3).iterrows():
+            print(f"    {r.pc}: {r.explained_variance_ratio * 100:5.1f}% of variance; score variance "
+                  f"condition-plate {r.frac_condition_plate:.2f} / colony {r.frac_colony:.2f} / "
+                  f"technical {r.frac_technical:.2f}")
+
+    # -- 4b. Analytical QC (technical %CV, biological %CV, technical/total SD ratio) ----
     # Computed on X_linear (linear, normalised, pre-transform) with the colony
     # grouping so technical vs biological dispersion are separated correctly.
     if getattr(config, 'RUN_QC_METRICS', False):
-        print("\n[4b] Quality-control metrics (technical %CV, biological %CV, D-ratio)")
+        print("\n[4b] Quality-control metrics (technical %CV, biological %CV, technical/total SD ratio)")
         _qc_table, _qc_summary = run_quality_control(
             X_linear, mz, groups, y_labels, supp_dir, safe_name, config)
         print(f"    median technical %CV = {_qc_summary['median_technical_cv_pct']:.1f}%  |  "
-              f"median D-ratio = {_qc_summary['median_dratio_pct']:.1f}%  |  "
+              f"median technical/total SD ratio = {_qc_summary['median_dratio_pct']:.1f}%  |  "
               f"features passing both = {_qc_summary['n_pass_both']}/{_qc_summary['n_features']}")
 
     # -- Leak-free preprocessor for cross-validation -----------------------------
@@ -227,12 +271,41 @@ def main():
             n_splits=n_splits, n_perm=config.N_Q2_PERMUTATIONS,
             random_state=config.RANDOM_SEED,
         )
+        print(f"    [legacy] Q^2 here is cross-validated on the globally preprocessed matrix "
+              f"(not leak-free); use the grouped Q^2 profile below.")
         print(f"    R^2Y = {plsda_qual['r2y']:.3f}  (apparent fit)   "
-              f"permuted p = {plsda_qual['r2y_p']:.4f}")
-        print(f"    Q^2  = {plsda_qual['q2']:.3f}  (cross-validated) "
-              f"permuted p = {plsda_qual['q2_p']:.4f} "
-              f"({'significant' if plsda_qual['q2_p'] < 0.05 else 'NOT significant'} "
-              f"at a=0.05)")
+              f"shuffled-label exceedance = {plsda_qual['r2y_p']:.3f}")
+        print(f"    Q^2  = {plsda_qual['q2']:.3f}  shuffled-label exceedance = "
+              f"{plsda_qual['q2_p']:.3f} (exploratory; not a p-value)")
+
+    # -- 6c. Multi-component VIP with leak-free, colony-grouped Q^2 (v2) ----------
+    vip_multi, a_star = None, None
+    if getattr(config, 'RUN_MULTICOMPONENT_VIP', True):
+        from standard.pipeline import (grouped_q2_profile, VALIDATED_PLS_TOL,
+                                       VALIDATED_PLS_MAX_ITER, VIP_REFERENCE_LABEL,
+                                       VIP_MULTICOMPONENT_LABEL)
+        _maxc = int(max(1, min(getattr(config, 'PLS_MAX_COMPONENTS', 8), n_groups - 1)))
+        print(f"\n[6c] Grouped Q^2 profile (1..{_maxc} LVs; StratifiedGroupKFold "
+              f"{getattr(config, 'Q2_N_SPLITS', 3)} folds x {getattr(config, 'Q2_N_REPEATS', 5)} repeats; "
+              f"preprocessing refitted per fold)")
+        _q2 = grouped_q2_profile(X_binned, y_labels, groups, prep_steps, max_components=_maxc,
+                                 n_splits=getattr(config, 'Q2_N_SPLITS', 3),
+                                 n_repeats=getattr(config, 'Q2_N_REPEATS', 5),
+                                 random_state=config.RANDOM_SEED)
+        a_star = int(_q2['best_n_components'])
+        pd.DataFrame({'n_components': _q2['components'], 'grouped_q2_mean': _q2['q2'],
+                      'grouped_q2_sd': _q2['q2_repeats'].std(axis=0)}).to_csv(
+            os.path.join(out_dir, f'plsda_q2_profile_{safe_name}.csv'), index=False)
+        vip_multi = compute_vip(X, y_labels, n_components=a_star, tol=VALIDATED_PLS_TOL,
+                                max_iter=VALIDATED_PLS_MAX_ITER)
+        print(f"    Q^2 by LV: " + ', '.join(f"{a}:{q:.3f}" for a, q in zip(_q2['components'], _q2['q2'])))
+        print(f"    A* = {a_star} (argmax grouped Q^2)")
+        _vip_tab = pd.DataFrame({'mz': mz, 'vip_comp1': vip,
+                                 'vip_comp1_rank': pd.Series(-vip).rank(method='min').astype(int).values,
+                                 f'vip_multi_A{a_star}': vip_multi,
+                                 'vip_multi_rank': pd.Series(-vip_multi).rank(method='min').astype(int).values})
+        _vip_tab.to_csv(os.path.join(out_dir, f'vip_{safe_name}.csv'), index=False)
+        print(f"    vip_comp1 = {VIP_REFERENCE_LABEL}; vip_multi = {VIP_MULTICOMPONENT_LABEL}")
 
     # -- 7-11. Classifiers (CORRECTED: grouped + leak-free) ----------------------
     all_classifiers = {
@@ -274,6 +347,30 @@ def main():
              **{f"{name}__train": train_accs for name, (_, train_accs) in results.items()},
              **{f"{name}__balanced": balanced[name] for name in results})
     print(f"\n  Classifier results saved -> {results_path}")
+
+    # -- 10b. Principal accuracy table + supplementary leave-one-colony-out (v2) --
+    _acc = pd.DataFrame([dict(classifier=n, cv=f'{n_splits}-fold colony-grouped x {n_repeats}',
+                              test_accuracy_mean=float(t.mean()), test_accuracy_sd=float(t.std()),
+                              train_accuracy_mean=float(tr.mean()),
+                              balanced_accuracy_mean=float(balanced[n].mean()))
+                         for n, (t, tr) in results.items()])
+    if getattr(config, 'RUN_LOCO_CV', True):
+        print("\n[10b] Leave-one-colony-out (supplementary; pooled held-out predictions)")
+        _abbr = {'Random Forest': 'rf', 'SVM': 'svm', 'Gradient Boosting': 'gb',
+                 'Logistic Regression': 'lr', 'LDA': 'lda', 'Ridge': 'ridge'}
+        _loco, _conf = loco_table(X_binned, y_labels, groups, prep_steps,
+                                  methods=[_abbr[n] for n in results], n_biological=n_groups,
+                                  seed=config.RANDOM_SEED)
+        _acc = _acc.merge(_loco, on='classifier', how='left')
+        os.makedirs(supp_dir, exist_ok=True)
+        for _n, _c in _conf.items():
+            _c.to_csv(os.path.join(supp_dir, f"loco_confusion_{safe_name}_{_n.replace(' ', '_')}.csv"))
+        for _, r in _loco.iterrows():
+            print(f"    {r.classifier:22s} LOCO accuracy {r.loco_accuracy:.3f}  "
+                  f"balanced {r.loco_balanced_accuracy:.3f}  macro-F1 {r.loco_macro_f1:.3f}")
+    _acc['chance_level'] = 1.0 / len(classes)
+    _acc['n_spectra'] = len(y_labels); _acc['n_colonies'] = n_groups
+    _acc.to_csv(os.path.join(out_dir, f'classifier_accuracy_{safe_name}.csv'), index=False)
 
     # -- 11. Plot comparison (chance line at 1/n_classes) ------------------------
     print("\n[11/12] Plot Comparison")
@@ -328,10 +425,41 @@ def main():
         overlap_df.to_csv(overlap_csv, index=False, encoding='utf-8')
         print(f"  Candidate table updated with permutation importance -> {overlap_csv}")
 
+    # -- 12c. Annotate rankings: multi-component VIP + spectral signal groups (v2) --
+    _rank_path = os.path.join(out_dir, f'feature_rankings_{safe_name}.csv')
+    _ovl_path = os.path.join(out_dir, f'feature_overlap_{safe_name}.csv')
+    _ann = pd.DataFrame({'mz': mz})
+    if vip_multi is not None:
+        _ann['vip_multi'] = vip_multi
+        _ann['vip_multi_rank'] = pd.Series(-vip_multi).rank(method='min').astype(int).values
+        _ann['vip_multi_A'] = a_star
+    if getattr(config, 'RUN_SIGNAL_GROUPS', True):
+        from shared.feature_groups import build_signal_groups
+        _map, _pairs = build_signal_groups(X_binned, mz_binned, X_raw, raw_mz_grid, groups,
+                                           bin_width=config.BIN_WIDTH,
+                                           r_min=getattr(config, 'SIGNAL_R_MIN', 0.9))
+        _map.to_csv(os.path.join(out_dir, f'signal_groups_{safe_name}.csv'), index=False)
+        _pairs.to_csv(os.path.join(supp_dir, f'signal_group_evidence_{safe_name}.csv'), index=False)
+        _sig = _map.set_index('mz_bin')
+        _ann['signal_group'] = _sig.reindex(mz)['signal_group'].values
+        _ann['signal_mz'] = _sig.reindex(mz)['signal_mz'].values
+        _ann['n_bins_in_signal'] = pd.Series(_ann['signal_group']).map(
+            _map.groupby('signal_group').size()).values
+        print(f"\n[12c] Signal groups: {_map.signal_group.nunique()} signals from {len(_map)} bins "
+              f"({int((_map.groupby('signal_group').size() > 1).sum())} multi-bin signals)")
+    if _ann.shape[1] > 1:
+        for _path in (_rank_path, _ovl_path):
+            if os.path.exists(_path):
+                _t = pd.read_csv(_path)
+                _t = _t.drop(columns=[c for c in _ann.columns if c != 'mz' and c in _t.columns])
+                _t = _t.merge(_ann, on='mz', how='left')
+                _t.to_csv(_path, index=False, encoding='utf-8')
+        overlap_df = pd.read_csv(_ovl_path)
+
     plot_spectrum_with_features(X_binned, mz_binned, y_labels, overlap_df, experiment_name,
                                 out_path=os.path.join(out_dir, f"spectrum_features_{safe_name}.png"))
 
-    print("\nDone.")
+    print(f"\nDone in {time.time() - t_start:.0f} s. Results: {out_dir}")
 
 
 if __name__ == '__main__':

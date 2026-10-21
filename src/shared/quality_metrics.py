@@ -11,7 +11,11 @@ formulae so they can be quoted directly in a Methods section:
                         across technical replicates of the same biological unit.
    - biological_cv    : per-feature biological %CV across biological units
                         (e.g. colonies) within a class.
-   - dispersion_ratio : the Broadhurst D-ratio, sigma_technical / sigma_total,
+   - dispersion_ratio : technical-to-total SD ratio, sigma_technical / sigma_total.
+     NOTE (v2): computed from technical replicates of colonies, WITHOUT pooled QC
+     samples, so it is not the QC-based D-ratio of Broadhurst et al. (2018); it is
+     reported as a 'technical/total SD ratio' (column names keep 'dratio' for
+     backward compatibility),
                         the recommended feature-quality filter for untargeted
                         metabolomics.
    - qc_report        : rolls the three up into per-feature and summary tables.

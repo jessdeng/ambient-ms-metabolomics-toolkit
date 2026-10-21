@@ -401,11 +401,16 @@ def bootstrap_selection_frequency(X_filt_raw, y_labels, groups, preprocess_fn,
 # Label-permutation null for the overlap counts                                   #
 # ----------------------------------------------------------------------------- #
 def _one_permutation(child_seed, X_scaled, y_labels, vip_fn, top_n, k_values,
-                     n_features, use_methods):
+                     n_features, use_methods, groups=None):
     """Single label-permutation replicate. Returns (per_k_counts_dict,
     feature_hit_mask) or None if degenerate. Pure function of `child_seed`."""
     rng = np.random.default_rng(child_seed)
-    yp = rng.permutation(y_labels)
+    if groups is not None:
+        # Colony-level shuffle: technical replicates keep their colony's label.
+        from shared.grouping import permute_labels_by_group
+        yp = permute_labels_by_group(y_labels, groups, rng)
+    else:
+        yp = rng.permutation(y_labels)      # legacy per-spectrum shuffle
     yp_enc = LabelEncoder().fit_transform(yp)
     model_seed = int(rng.integers(0, 2**31 - 1))
     top_sets = _ensemble_top_sets(X_scaled, yp_enc, yp, top_n, model_seed, vip_fn,
@@ -420,8 +425,18 @@ def _one_permutation(child_seed, X_scaled, y_labels, vip_fn, top_n, k_values,
 
 def overlap_permutation_null(X_scaled, y_labels, vip_fn, top_n=50,
                              k_values=(2, 3, 4, 5, 6), n_perm=200, seed=42,
-                             use_methods=None, n_jobs=-1):
-    """Null distribution of the cross-method overlap under label permutation.
+                             use_methods=None, n_jobs=-1, groups=None):
+    """Exploratory reference distribution of the cross-method overlap under
+    shuffled labels.
+
+    ``groups`` (colony ids): labels are shuffled between whole colonies, so the
+    technical replicates of a colony move together (recommended). ``groups=None``
+    reproduces the original per-spectrum shuffle, which treats technical
+    replicates as exchangeable and gives a reference distribution that is too
+    narrow. Because condition and plate are aliased in the light-exposure design,
+    even colony-level shuffling does not yield a valid significance test: report
+    the share of shuffles reaching the observed value as an exploratory
+    exceedance proportion, not as a p-value.
 
     Preprocessing is label-independent, so the already-scaled descriptive matrix
     `X_scaled` is reused and only the labels are permuted. For each permutation
@@ -442,7 +457,7 @@ def overlap_permutation_null(X_scaled, y_labels, vip_fn, top_n=50,
     plus
         per_feature_null_freq : ndarray (n_features,)
             fraction of permutations in which each feature reached >= min(k)
-            methods — a per-feature empirical selection p-value.
+            methods (descriptive exceedance rate under shuffled labels; not a p-value).
     """
     X_scaled = np.asarray(X_scaled, dtype=float)
     y_labels = np.asarray(y_labels)
@@ -453,7 +468,7 @@ def overlap_permutation_null(X_scaled, y_labels, vip_fn, top_n=50,
     results = Parallel(n_jobs=n_jobs)(
         delayed(_one_permutation)(
             cs, X_scaled, y_labels, vip_fn, top_n, k_values, n_features,
-            use_methods)
+            use_methods, groups)
         for cs in child_seeds
     )
 
