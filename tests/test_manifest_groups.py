@@ -63,3 +63,16 @@ def test_load_experiment_skips_root_manifest(tmp_path):
     pd.DataFrame({'file_path': ['A/x.csv'], 'class': ['A'], 'colony': ['W1']}).to_csv(tmp_path / 'metadata_manifest.csv', index=False)
     X, y, names, mz = load_experiment(str(tmp_path), validate=False)
     assert len(names) == 4 and all('/' in n for n in names)
+
+
+def test_template_written_manifest_is_accepted(tmp_path):
+    """The template from generate_metadata_template() must load without edits."""
+    from shared.grouping import generate_metadata_template, load_manifest_groups
+    from standard.preprocessing import load_experiment
+    import shutil, os
+    src = os.path.join(os.path.dirname(__file__), '..', 'data', 'sample_experiment')
+    exp = tmp_path / 'demo'; shutil.copytree(src, exp)
+    generate_metadata_template(str(exp))
+    _, y, names, _ = load_experiment(str(exp), validate=False)
+    g = load_manifest_groups(str(exp / 'metadata_manifest.csv'), names, y_labels=y)
+    assert len(set(g)) == 6

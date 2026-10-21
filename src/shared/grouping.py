@@ -642,6 +642,10 @@ def load_manifest_groups(manifest_path, names, y_labels=None,
     """
     import pandas as pd
     man = pd.read_csv(manifest_path, dtype=str)
+    # The template written by generate_metadata_template() names the biological
+    # replicate column 'biological_replicate_group'; accept it as 'colony'.
+    if 'colony' not in man.columns and 'biological_replicate_group' in man.columns:
+        man = man.rename(columns={'biological_replicate_group': 'colony'})
     missing = [c for c in MANIFEST_REQUIRED_COLUMNS if c not in man.columns]
     if missing:
         raise ValueError(f"Manifest {manifest_path!r} lacks columns {missing}.")
