@@ -178,9 +178,9 @@ def run_summary_report(X, y_labels, mz, safe_name, out_dir, classifier_results=N
             lines.append(f"  {name:22s}  test={test_accs.mean():.3f} +/- {test_accs.std():.3f}  "
                          f"train={train_accs.mean():.3f} +/- {train_accs.std():.3f}")
         else:
-            test_accs, train_accs = fn(X, y_labels, n_splits=config.CV_FOLDS)
-            lines.append(f"  {name:22s}  test={test_accs.mean():.3f} +/- {test_accs.std():.3f}  "
-                         f"train={train_accs.mean():.3f} +/- {train_accs.std():.3f}")
+            # v2: no ungrouped fallback CV here (it would ignore colony structure and
+            # fit preprocessing outside the folds). Use the grouped results.
+            lines.append(f"  {name:22s}  [not computed - run run_analysis.py first]")
 
     lines.append("\n-- Output Files ------------------------------------------------")
     output_patterns = [

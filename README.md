@@ -153,6 +153,13 @@ All in `results/standard/<experiment>/`:
 | `supplementary/` | confusion matrices, classification metrics, QC (technical %CV, technical/total SD ratio) |
 | `run_manifest.json` | settings, package versions, Git commit and input files of the run |
 
+**Multi-experiment figures** (after the standard analysis has been run for each experiment):
+
+```bash
+python src/scripts/pca_overview.py experiment_a experiment_b experiment_c experiment_d      # PCA overview -> results/standard/pca_overview.png
+python src/scripts/vip_vs_nmethods.py experiment_a experiment_b experiment_c experiment_d   # ensemble count vs component-1 VIP -> results/standard/vip_vs_nmethods.png
+```
+
 ## Optional validation analyses
 
 These analyses are slow (minutes to hours) and are **never run by default**. They were used to validate the feature prioritisation reported in the manuscript.
@@ -164,6 +171,8 @@ PYTHONPATH=src:. python -m validation.run_technical   --isolate MY_EXPERIMENT   
 PYTHONPATH=src:. python -m validation.run_sensitivity --isolates MY_EXPERIMENT                 # preprocessing / binning sensitivity
 PYTHONPATH=src:. python -m validation.run_unsupervised --isolates MY_EXPERIMENT                # extended PCA diagnostics
 ```
+
+**Prerequisites (v2 limitation).** `run_sensitivity`, `run_classification` and `run_benchmark` are self-contained. `run_stability`, `run_technical` and `run_agreement` (and the importance-dependent parts of `run_unsupervised`) read the per-isolate importance tables and the grouped-Q² A* table in `results/validation/step4_importance/`. The scripts that generate those tables have not yet been ported to this release (see docs/CHANGES_v2.md, "Remaining limitations").
 
 Shuffled-label analyses report **exceedance proportions** (the share of shuffles reaching the observed value), never p-values. See below.
 
