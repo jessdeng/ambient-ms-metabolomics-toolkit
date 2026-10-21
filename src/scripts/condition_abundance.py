@@ -9,8 +9,10 @@ ridge_<group>) are written directly to feature_overlap_<experiment>.csv by
 run_analysis.py. This script no longer recomputes them — it just reads the
 CSV and produces the heatmap figure.
 
-Usage (from repo root):
-    python -m src.scripts.condition_abundance
+Usage (from the repository folder; run run_analysis.py first):
+    python src/scripts/condition_abundance.py            # EXPERIMENT from config.json
+    python src/scripts/condition_abundance.py my_experiment   # or name the experiment
+The figure is saved next to the results, e.g. results/standard/my_experiment/.
 
 Configure PIPELINE and MIN_N_METHODS below.
 """
@@ -32,7 +34,8 @@ sys.path.insert(0, _ROOT)  # config.py lives here
 sys.path.insert(0, _SRC)   # src/ packages take priority
 import config
 
-from src.shared.plot_style import apply_style, pub_savefig
+from shared.plot_style import apply_style, pub_savefig   # after the path setup
+from scripts._common import experiment_and_folder, report_missing
 
 apply_style()
 
@@ -46,14 +49,11 @@ OUTPUT_DIR = os.path.join(BASE_DIR, 'results', PIPELINE)
 
 
 def main():
-    experiment = config.EXPERIMENT.strip()
-    safe_name  = experiment.replace(' ', '_').replace(':', '')
-
-    overlap_path = os.path.join(OUTPUT_DIR, f'feature_overlap_{safe_name}.csv')
-    if not os.path.exists(overlap_path):
-        print(f"feature_overlap CSV not found: {overlap_path}")
-        print("Run run_analysis.py first.")
+    experiment, safe_name, folder = experiment_and_folder(OUTPUT_DIR, config)
+    if folder is None:
+        report_missing(OUTPUT_DIR, experiment, safe_name, 'condition_abundance')
         return
+    overlap_path = os.path.join(folder, f'feature_overlap_{safe_name}.csv')
 
     df = pd.read_csv(overlap_path)
 
@@ -151,8 +151,7 @@ def main():
     )
 
     plt.tight_layout()
-    plot_path = os.path.join(OUTPUT_DIR, f'condition_abundance_{safe_name}.png')
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    plot_path = os.path.join(folder, f'condition_abundance_{safe_name}.png')
     pub_savefig(plot_path)
 
 
