@@ -7,8 +7,10 @@ highlighted as vertical tick marks.
 Reads feature_overlap_<experiment>.csv and the raw binned intensity matrix from
 the results folder, then calls shared.visualization.plot_spectrum_with_features.
 
-Usage (from repo root):
-    python -m src.scripts.condition_spectrum
+Usage (from the repository folder; run run_analysis.py first):
+    python src/scripts/condition_spectrum.py            # EXPERIMENT from config.json
+    python src/scripts/condition_spectrum.py my_experiment   # or name the experiment
+The figure is saved next to the results, e.g. results/standard/my_experiment/.
 
 Configure PIPELINE below to match the pipeline you ran.
 """
@@ -24,6 +26,7 @@ _ROOT = os.path.dirname(_SRC)
 sys.path.insert(0, _ROOT)  # config.py lives here
 sys.path.insert(0, _SRC)   # src/ packages take priority
 import config
+from scripts._common import experiment_and_folder, report_missing
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 PIPELINE      = 'standard'    # 'standard' or 'r_comparable'
@@ -51,16 +54,11 @@ def _load_pipeline(pipeline):
 
 
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    experiment = config.EXPERIMENT.strip()
-    safe_name  = experiment.replace(' ', '_').replace(':', '')
-
-    overlap_path = os.path.join(OUTPUT_DIR, f'feature_overlap_{safe_name}.csv')
-    if not os.path.exists(overlap_path):
-        print(f"feature_overlap CSV not found: {overlap_path}")
-        print("Run run_analysis.py first.")
+    experiment, safe_name, folder = experiment_and_folder(OUTPUT_DIR, config)
+    if folder is None:
+        report_missing(OUTPUT_DIR, experiment, safe_name, 'condition_spectrum')
         return
+    overlap_path = os.path.join(folder, f'feature_overlap_{safe_name}.csv')
 
     overlap_df = pd.read_csv(overlap_path)
     print(f"Loaded {len(overlap_df)} candidate features from {overlap_path}")
@@ -75,7 +73,10 @@ def main():
         print("Place your data inside data/<EXPERIMENT>/ and re-run.")
         return
 
-    X_raw, y_labels, sample_names, mz = load_experiment(experiment_dir)
+    # same spectral grid as run_analysis.py (v2 default: native instrument points)
+    X_raw, y_labels, sample_names, mz = load_experiment(
+        experiment_dir, validate=False,
+        resample=getattr(config, 'SPECTRAL_RESAMPLING', 'linspace5000'))
 
     X_binned, mz = bin_features(X_raw, mz, bin_width=config.BIN_WIDTH)
     X_binned, mz = filter_mass_range(X_binned, mz,
@@ -84,7 +85,7 @@ def main():
     from shared.visualization import plot_spectrum_with_features
 
     ext      = 'html' if INTERACTIVE else 'png'
-    out_path = os.path.join(OUTPUT_DIR, f'condition_spectrum_{safe_name}.{ext}')
+    out_path = os.path.join(folder, f'condition_spectrum_{safe_name}.{ext}')
     plot_spectrum_with_features(
         X_binned, mz, y_labels, overlap_df,
         experiment_name=f'{experiment} ({PIPELINE})',

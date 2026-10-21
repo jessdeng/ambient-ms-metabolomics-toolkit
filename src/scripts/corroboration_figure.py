@@ -1,13 +1,13 @@
 """
 corroboration_figure.py
 =======================
-Single publication-ready PNG that defends the multi-method ensemble approach.
+Single PNG summarising which importance methods select which m/z features.
 
   Top panel  -- UpSet plot of method intersections among ensemble features
                (n_methods >= 2). Bars show the SIZE of each intersection;
                the dot matrix below shows WHICH methods are in each.
-               Together this answers "do the methods agree?" and "what
-               does VIP miss that the others catch (and vice versa)?".
+               Together this shows where the methods agree and which
+               features each method selects that the others do not.
 
   Bottom panel -- Top N most corroborated m/z, ranked by n_methods.
                  Each row is one m/z. Bar length encodes n_methods
@@ -20,8 +20,10 @@ Reads from feature_overlap_<experiment>.csv. Requires the per-method
 membership columns (in_rf_top, in_svm_top, ...) and the per-group
 attribution columns (top_condition_mean, mean_margin, ...).
 
-Usage (from repo root):
-    python -m src.scripts.corroboration_figure
+Usage (from the repository folder; run run_analysis.py first):
+    python src/scripts/corroboration_figure.py            # EXPERIMENT from config.json
+    python src/scripts/corroboration_figure.py my_experiment   # or name the experiment
+The figure is saved next to the results, e.g. results/standard/my_experiment/.
 
 Configure PIPELINE and the thresholds below.
 """
@@ -35,16 +37,16 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from src.shared.plot_style import apply_style, pub_savefig
-
-apply_style()
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC  = os.path.dirname(_HERE)
 _ROOT = os.path.dirname(_SRC)
 sys.path.insert(0, _ROOT)  # config.py lives here
 sys.path.insert(0, _SRC)   # src/ packages take priority
 import config
+from shared.plot_style import apply_style, pub_savefig   # after the path setup
+from scripts._common import experiment_and_folder, report_missing
+
+apply_style()
 
 # -- Configuration -------------------------------------------------------------
 PIPELINE          = 'standard'   # 'standard' or 'r_comparable'
@@ -63,12 +65,11 @@ N_METHODS_TOTAL = len(METHOD_NAMES)
 
 
 def _load_overlap():
-    experiment = config.EXPERIMENT.strip()
-    safe_name  = experiment.replace(' ', '_').replace(':', '')
-    path = os.path.join(OUTPUT_DIR, f'feature_overlap_{safe_name}.csv')
-    if not os.path.exists(path):
-        return None, experiment, safe_name
-    return pd.read_csv(path), experiment, safe_name
+    experiment, safe_name, folder = experiment_and_folder(OUTPUT_DIR, config)
+    if folder is None:
+        return None, experiment, safe_name, None
+    path = os.path.join(folder, f'feature_overlap_{safe_name}.csv')
+    return pd.read_csv(path), experiment, safe_name, folder
 
 
 # -- UpSet panel ---------------------------------------------------------------
@@ -185,14 +186,9 @@ def _draw_ranked_bars(fig, gs, df, group_palette):
 # -- Main ----------------------------------------------------------------------
 
 def main():
-    if not os.path.isdir(OUTPUT_DIR):
-        print(f"Output folder not found: {OUTPUT_DIR}")
-        return
-
-    df, experiment, safe_name = _load_overlap()
+    df, experiment, safe_name, folder = _load_overlap()
     if df is None:
-        print(f"feature_overlap CSV not found in {OUTPUT_DIR}")
-        print("Run run_analysis.py first.")
+        report_missing(OUTPUT_DIR, experiment, safe_name, 'corroboration_figure')
         return
 
     needed  = METHOD_COLUMNS + ['mz', 'n_methods', 'mean_margin', 'top_condition_mean']
@@ -215,10 +211,10 @@ def main():
     _draw_upset(fig, gs[0], df)
     _draw_ranked_bars(fig, gs[1], df, group_palette)
 
-    fig.suptitle(f'Ensemble corroboration -- {experiment}',
+    fig.suptitle(f'Method agreement on m/z features -- {experiment}',
                  fontsize=13, y=0.998)
 
-    out_path = os.path.join(OUTPUT_DIR, f'corroboration_{safe_name}.png')
+    out_path = os.path.join(folder, f'corroboration_{safe_name}.png')
     pub_savefig(out_path)
 
 

@@ -160,6 +160,14 @@ python src/scripts/pca_overview.py experiment_a experiment_b experiment_c experi
 python src/scripts/vip_vs_nmethods.py experiment_a experiment_b experiment_c experiment_d   # ensemble count vs component-1 VIP -> results/standard/vip_vs_nmethods.png
 ```
 
+**Single-experiment figures** (EXPERIMENT from `config.json`, or give the name; saved in `results/standard/<experiment>/`):
+
+```bash
+python src/scripts/corroboration_figure.py my_experiment   # which methods select which m/z
+python src/scripts/condition_abundance.py my_experiment    # condition means of features with n_methods >= 4
+python src/scripts/condition_spectrum.py my_experiment     # condition-mean spectra with candidate features marked (HTML)
+```
+
 ## Optional validation analyses
 
 These analyses are slow (minutes to hours) and are **never run by default**. They were used to validate the feature prioritisation reported in the manuscript.
