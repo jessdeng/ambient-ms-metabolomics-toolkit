@@ -1,40 +1,40 @@
 {
-  "_comment": "Edit this file to configure your experiment. Values here override config.py defaults. Only the fields you change need to be present. Set EXPERIMENT to the name of your data folder under data/.",
-
-  "EXPERIMENT": "your_experiment_folder",
-
+  "_comment": "Standard analysis settings (toolkit v2). Copy this file, set EXPERIMENT to your data folder under data/, then run:  python src/standard/run_analysis.py --config <this file>",
+  "EXPERIMENT": "sample_experiment",
   "MZ_MIN": 100,
-  "MZ_MAX": 1000,
+  "MZ_MAX": 2000,
   "BIN_WIDTH": 0.5,
-
+  "SPECTRAL_RESAMPLING": "native",
   "NORMALIZATION": "tic",
-  "LOG_TRANSFORM": "glog",
+  "LOG_TRANSFORM": "log10",
   "SCALING": "autoscale",
-
   "VARIANCE_PERCENTILE": 25,
   "ABUNDANCE_PERCENTILE": 5,
-
-  "_snr_comment": "SNR floor: set SNR_FLOOR_ENABLED=true to strip flat baseline bins (recommended for the standard pipeline).",
-  "SNR_FLOOR_ENABLED": true,
-  "SNR_THRESHOLD": 3,
-  "NOISE_QUANTILE": 60,
-  "MIN_FRACTION_IN_GROUP": 0.5,
-
+  "PREVALENCE_THRESHOLD": 0.5,
+  "SNR_FLOOR_ENABLED": false,
   "RANDOM_SEED": 42,
   "CV_FOLDS": 5,
   "N_CV_REPEATS": 10,
-
-  "_stats_comment": "Univariate test + FDR, bootstrap stability, overlap null, and PLS-DA Q2 diagnostics. Lower the iteration counts (or set the RUN_* flags false) for faster iteration.",
-  "UNIVARIATE_TEST": "auto",
-  "RUN_FEATURE_STABILITY": true,
+  "TOP_N_FEATURES": 50,
+  "N_PLSDA_COMPONENTS": 8,
+  "PLSDA_VIP_NUM_COMPONENTS": 1,
+  "METADATA_MANIFEST": "metadata_manifest.csv",
+  "EXPECTED_TECH_REPS": null,
+  "RUN_PCA": true,
+  "N_PCA_COMPONENTS": 5,
+  "RUN_MULTICOMPONENT_VIP": true,
+  "PLS_MAX_COMPONENTS": 8,
+  "Q2_N_SPLITS": 3,
+  "Q2_N_REPEATS": 5,
+  "RUN_SIGNAL_GROUPS": true,
+  "SIGNAL_R_MIN": 0.9,
+  "RUN_LOCO_CV": true,
+  "_optional_comment": "Slow, optional analyses (off by default): bootstrap stability, overlap reference distribution, legacy Q2 permutations, held-out permutation importance.",
+  "RUN_FEATURE_STABILITY": false,
   "N_BOOTSTRAP": 200,
-  "RUN_OVERLAP_PERMUTATION": true,
+  "RUN_OVERLAP_PERMUTATION": false,
   "N_OVERLAP_PERMUTATIONS": 200,
-  "RUN_PLSDA_Q2": true,
-  "N_Q2_PERMUTATIONS": 200,
-
-  "N_JOBS": -1,
-
-  "RUN_PERMUTATION_TEST": true,
-  "N_PERMUTATIONS": 100
+  "RUN_PLSDA_Q2": false,
+  "RUN_PERMUTATION_IMPORTANCE": false,
+  "N_JOBS": 1
 }

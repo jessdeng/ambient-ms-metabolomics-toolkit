@@ -76,7 +76,8 @@ def main():
 
         rng    = np.random.default_rng(42)
         jitter = rng.uniform(-0.12, 0.12, size=len(df))
-        sizes  = df['n_methods'].map({2: 40, 3: 80, 4: 140, 5: 220})
+        # n = 6 (all six rankings) was previously unmapped -> NaN size -> point dropped.
+        sizes  = df['n_methods'].map({1: 20, 2: 40, 3: 80, 4: 140, 5: 220, 6: 320})
 
         ax.scatter(
             df['n_methods'] + jitter,
@@ -102,16 +103,16 @@ def main():
         ax.set_ylabel('PLS-DA VIP score', fontsize=8)
         ax.set_xticks([2, 3, 4, 5])
         ax.tick_params(labelsize=8)
-        ax.set_xlim(1.5, 5.8)
+        ax.set_xlim(max(0.5, df['n_methods'].min() - 0.5), 6.5)
 
     # Shading and n counts (after ylim is set)
     for ax, (name, fpath) in zip(axes, experiments.items()):
         df   = pd.read_csv(fpath)
         ymax = ax.get_ylim()[1]
-        ax.axvspan(3.5, 5.8, ymin=0,
+        ax.axvspan(3.5, 6.5, ymin=0,
                    ymax=1.0 / ymax if ymax > 1.0 else 1.0,
                    color='#FDEBD0', alpha=0.35, zorder=0)
-        for n_m in [2, 3, 4, 5]:
+        for n_m in [1, 2, 3, 4, 5, 6]:
             count = len(df[df['n_methods'] == n_m])
             if count > 0:
                 ax.text(n_m, ax.get_ylim()[0] + 0.02, f'n={count}',
@@ -127,6 +128,7 @@ def main():
         plt.scatter([], [], s=80,  color='grey', alpha=0.6, label='n = 3 methods'),
         plt.scatter([], [], s=140, color='grey', alpha=0.6, label='n = 4 methods'),
         plt.scatter([], [], s=220, color='grey', alpha=0.6, label='n = 5 methods'),
+        plt.scatter([], [], s=320, color='grey', alpha=0.6, label='n = 6 methods'),
         mpatches.Patch(color='#FDEBD0', alpha=0.5, label='High confidence, VIP < 1.0'),
         plt.Line2D([0], [0], color='#888888', linestyle='--',
                    linewidth=0.9, label='VIP = 1.0 threshold'),

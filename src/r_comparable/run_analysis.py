@@ -37,7 +37,7 @@ from shared.classifier_comparison import (
     make_preprocessor, auto_n_splits,
 )
 from shared.classifier_comparison_standard import grouped_permutation_importance
-from shared.grouping import make_groups, check_batch_confound
+from shared.grouping import make_groups, check_batch_confound, resolve_groups
 from shared.visualization import plot_spectrum_with_features
 from shared.runtime import resolve_experiment_dir, write_run_manifest
 from shared.reporting import run_quality_control, run_classification_benchmark
@@ -88,7 +88,9 @@ def main():
     # Build the leave-one-biological-replicate-out groups now (single source of
     # truth, reused below) and HARD-FAIL on an n=1 design so cross-validation can
     # never emit a misleading ~1.0 score on a confounded study.
-    groups    = make_groups(y_labels, sample_names, validate=False)
+    groups    = resolve_groups(y_labels, sample_names, experiment_dir,
+                               getattr(config, 'METADATA_MANIFEST', None),
+                               getattr(config, 'EXPECTED_TECH_REPS', None))
     n_groups  = len(set(groups))
     n_classes = int(np.unique(y_labels).size)
     check_batch_confound(y_labels, groups, names=sample_names, enforce=True)
@@ -177,13 +179,13 @@ def main():
     X        = _stages['scaled']
     X_linear = _stages['normalized']
 
-    # ── 4b. Analytical QC (technical %CV, biological %CV, Broadhurst D-ratio) ──
+    # ── 4b. Analytical QC (technical %CV, biological %CV, technical/total SD ratio) ──
     if getattr(config, 'RUN_QC_METRICS', False):
-        print("\n[4b] Quality-control metrics (technical %CV, biological %CV, D-ratio)")
+        print("\n[4b] Quality-control metrics (technical %CV, biological %CV, technical/total SD ratio)")
         _qc_table, _qc_summary = run_quality_control(
             X_linear, mz, groups, y_labels, supp_dir, safe_name, config)
         print(f"    median technical %CV = {_qc_summary['median_technical_cv_pct']:.1f}%  |  "
-              f"median D-ratio = {_qc_summary['median_dratio_pct']:.1f}%  |  "
+              f"median technical/total SD ratio = {_qc_summary['median_dratio_pct']:.1f}%  |  "
               f"features passing both = {_qc_summary['n_pass_both']}/{_qc_summary['n_features']}")
 
     # ── Leak-free preprocessor for cross-validation ──────────────────────────

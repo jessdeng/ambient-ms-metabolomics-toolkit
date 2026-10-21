@@ -13,8 +13,12 @@ import os
 import numpy as np
 import pandas as pd
 
+# File names in the experiment root that are metadata, never spectra.
+_METADATA_FILENAMES = {'metadata_manifest.csv'}
 
-def load_experiment(experiment_dir, tech_rep_pattern=None, validate=True):
+
+def load_experiment(experiment_dir, tech_rep_pattern=None, validate=True,
+                    resample='linspace5000'):
     """
     Read all CSVs and TXTs under the experiment folder and derive class + CV-group
     topology with a flexible, **bottom-up relative-depth** rule (see grouping.py).
@@ -44,6 +48,14 @@ def load_experiment(experiment_dir, tech_rep_pattern=None, validate=True):
         Trailing technical-replicate token for the flat-layout prefix rule.
     validate : bool
         Run the ≥2-groups-per-class pre-flight check and raise on failure.
+    resample : {'linspace5000', 'native'}
+        'linspace5000' (default; original behaviour): point-sample every spectrum
+        onto np.linspace(common_min, common_max, 5000). For a 0.1-Da, m/z 100-2000
+        export this is a 0.380-Da grid, so ~74% of instrument points are not used
+        and each 0.5-Da bin then sums 1 or 2 resampled points.
+        'native': keep the instrument points. If every file has the same m/z axis
+        the spectra are used without interpolation; otherwise they are linearly
+        interpolated onto a grid with the median native step over the common range.
 
     Returns
     -------
@@ -69,6 +81,11 @@ def load_experiment(experiment_dir, tech_rep_pattern=None, validate=True):
         dirnames[:] = sorted(d for d in dirnames if not d.startswith('.'))
         for fname in sorted(filenames):
             if fname.lower().endswith(('.csv', '.txt')) and not fname.startswith('.'):
+                # Metadata manifests (written by grouping.generate_metadata_template)
+                # live in the experiment root and are not spectra.
+                if (os.path.abspath(dirpath) == experiment_dir
+                        and fname.lower() in _METADATA_FILENAMES):
+                    continue
                 file_path = os.path.join(dirpath, fname)
                 rel = os.path.relpath(file_path, experiment_dir).replace(os.sep, '/')
                 discovered.append((rel, file_path))
@@ -119,7 +136,17 @@ def load_experiment(experiment_dir, tech_rep_pattern=None, validate=True):
     # 2. Build a common m/z axis covering the overlap range across all files.
     mz_min = max(mz.min() for mz in raw_mz_list)
     mz_max = min(mz.max() for mz in raw_mz_list)
-    common_mz = np.linspace(mz_min, mz_max, num=5000)
+    if resample == 'native':
+        ref = np.asarray(raw_mz_list[0], dtype=float)
+        if all(len(m) == len(ref) and np.allclose(m, ref, rtol=0, atol=1e-9)
+               for m in raw_mz_list):
+            return (np.array(samples, dtype=float), np.array(labels), names, ref)
+        step = float(np.median(np.diff(ref)))
+        common_mz = np.arange(mz_min, mz_max + step / 2.0, step)
+    elif resample == 'linspace5000':
+        common_mz = np.linspace(mz_min, mz_max, num=5000)
+    else:
+        raise ValueError(f"resample must be 'linspace5000' or 'native', got {resample!r}")
 
     # Interpolate every sample onto the common axis.
     interpolated = []
@@ -159,6 +186,27 @@ def bin_features(X, mz, bin_width=0.5):
 
     non_empty = X_binned.sum(axis=0) > 0
     return X_binned[:, non_empty], bin_labels[non_empty]
+
+
+def bin_features_nominal(X, mz, offset=0.6):
+    """Sum intensities into 1-Da nominal-mass bins [n - 1 + offset, n + offset).
+
+    Edges are placed at integer + ``offset`` so that a unit-resolution peak
+    (FWHM ~0.8 Da) centred near its nominal mass falls inside one bin. The
+    default 0.6 lies in the region of fractional m/z where no peak apexes occur
+    in the label-free pooled spectra of the light-exposure data (apex fractional
+    m/z 0.9-0.2 below m/z 800 and 0.2-0.4 above; see
+    docs/validation/sensitivity_report.md). Bins are labelled with the nominal
+    mass ``n``. Empty bins are dropped.
+    """
+    mz = np.asarray(mz, dtype=float)
+    n = np.floor(mz - offset).astype(int) + 1          # nominal mass of each point
+    labels = np.unique(n)
+    Xb = np.zeros((X.shape[0], len(labels)))
+    idx = np.searchsorted(labels, n)
+    np.add.at(Xb.T, idx, np.asarray(X, dtype=float).T)
+    keep = Xb.sum(axis=0) > 0
+    return Xb[:, keep], labels[keep].astype(float)
 
 
 def filter_prevalence(X, mz, y_labels, threshold=0.5, min_intensity=0.0):

@@ -606,3 +606,88 @@ if __name__ == '__main__':
     _exp = sys.argv[1]
     _infer = '--infer-order' in sys.argv[2:]
     generate_metadata_template(_exp, infer_order=_infer)
+
+
+# --------------------------------------------------------------------------- #
+# Manifest-based grouping (audit addition; make_groups remains the fallback)    #
+# --------------------------------------------------------------------------- #
+MANIFEST_REQUIRED_COLUMNS = ('file_path', 'class', 'colony')
+
+
+def load_manifest_groups(manifest_path, names, y_labels=None,
+                         expected_tech_reps=None, strict=True):
+    """CV groups ``'<class>::<colony>'`` read from a metadata manifest.
+
+    File names are fragile carriers of experimental structure (e.g. one colony's
+    replicates saved as ``AmbB5T1`` and ``AmberB5T2``). A manifest makes the
+    biological unit explicit and reviewable. Required columns: ``file_path``
+    (path relative to the experiment directory, POSIX form, as returned by
+    ``load_experiment``), ``class`` and ``colony``. Optional columns such as
+    ``plate`` or ``acquisition_order`` are ignored here.
+
+    Parameters
+    ----------
+    manifest_path : str
+    names : sequence of str        relative paths from ``load_experiment``.
+    y_labels : array-like or None  if given, must agree with the manifest class.
+    expected_tech_reps : int or None
+        If given, every colony must contain exactly this many files.
+    strict : bool
+        Raise on any inconsistency (default). If False, inconsistencies are
+        reported as warnings.
+
+    Returns
+    -------
+    np.ndarray of group ids aligned to ``names``.
+    """
+    import pandas as pd
+    man = pd.read_csv(manifest_path, dtype=str)
+    missing = [c for c in MANIFEST_REQUIRED_COLUMNS if c not in man.columns]
+    if missing:
+        raise ValueError(f"Manifest {manifest_path!r} lacks columns {missing}.")
+    man['file_path'] = man['file_path'].map(_posix)
+    lookup = man.set_index('file_path')
+    problems = []
+    names = [_posix(n) for n in names]
+    absent = [n for n in names if n not in lookup.index]
+    if absent:
+        problems.append(f"{len(absent)} file(s) not in manifest, e.g. {absent[:3]}")
+    if y_labels is not None and not absent:
+        y_labels = np.asarray(y_labels)
+        bad = [(n, lab, lookup.loc[n, 'class']) for n, lab in zip(names, y_labels)
+               if str(lookup.loc[n, 'class']).strip() != str(lab).strip()]
+        if bad:
+            problems.append(f"{len(bad)} class mismatch(es), e.g. {bad[:3]}")
+    if problems:
+        msg = "Manifest/grouping inconsistency:\n  - " + "\n  - ".join(problems)
+        if strict:
+            raise ValueError(msg)
+        warnings.warn(msg, stacklevel=2)
+        return None
+    groups = np.array([f"{lookup.loc[n, 'class']}::{lookup.loc[n, 'colony']}" for n in names])
+    if expected_tech_reps is not None:
+        uniq, counts = np.unique(groups, return_counts=True)
+        off = {g: int(c) for g, c in zip(uniq, counts) if c != expected_tech_reps}
+        if off:
+            msg = (f"Colonies without exactly {expected_tech_reps} technical "
+                   f"replicates: {off}")
+            if strict:
+                raise ValueError(msg)
+            warnings.warn(msg, stacklevel=2)
+    return groups
+
+
+def resolve_groups(y_labels, names, experiment_dir=None, manifest_name=None,
+                   expected_tech_reps=None, verbose=True):
+    """Manifest groups when ``<experiment_dir>/<manifest_name>`` exists, else
+    the filename-topology rule of :func:`make_groups` (unchanged behaviour)."""
+    if experiment_dir and manifest_name:
+        path = os.path.join(experiment_dir, manifest_name)
+        if os.path.exists(path):
+            g = load_manifest_groups(path, names, y_labels=y_labels,
+                                     expected_tech_reps=expected_tech_reps)
+            if verbose:
+                print(f"  CV groups from manifest {manifest_name!r}: "
+                      f"{len(set(g.tolist()))} colonies")
+            return g
+    return make_groups(y_labels, names, validate=False)

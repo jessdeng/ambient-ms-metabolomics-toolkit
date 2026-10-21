@@ -242,20 +242,20 @@ UNIVARIATE_GROUP_AGGREGATE = True
 # Resamples colonies with replacement, re-fits the ensemble, and reports how
 # often each feature is selected — out-of-sample evidence the candidate list is
 # reproducible. Slower (re-fits the ensemble N_BOOTSTRAP times). Set False to skip.
-RUN_FEATURE_STABILITY = True
+RUN_FEATURE_STABILITY = False   # v2: optional (slow); enable in your config file
 N_BOOTSTRAP = 200
 
 # ── Overlap permutation null ──────────────────────────────────────────────────────
 # Permutes labels and recomputes the cross-method overlap to calibrate how many
 # features would corroborate by chance (the linear methods are collinear, so the
 # raw overlap overstates independence). Reports observed vs null + empirical p.
-RUN_OVERLAP_PERMUTATION = True
+RUN_OVERLAP_PERMUTATION = False   # v2: optional (slow); enable in your config file
 N_OVERLAP_PERMUTATIONS = 200
 
 # ── PLS-DA Q² validation ──────────────────────────────────────────────────────────
 # Cross-validated Q² for the descriptive PLS-DA plus a permuted-Q² null, so the
 # VIP-based prioritisation is reported with a calibrated model-quality metric.
-RUN_PLSDA_Q2 = True
+RUN_PLSDA_Q2 = False   # v2: optional (slow); enable in your config file
 N_Q2_PERMUTATIONS = 200
 
 # ── Parallelism ───────────────────────────────────────────────────────────────────
@@ -275,7 +275,7 @@ TOP_N_FEATURES = 50
 # CV folds (grouped by colony), a model-agnostic alternative to impurity-based
 # feature_importances_. Saved to permutation_importance_<exp>.csv and merged into
 # the candidate table by m/z. Set False to skip (saves a little time).
-RUN_PERMUTATION_IMPORTANCE = True
+RUN_PERMUTATION_IMPORTANCE = False   # v2: optional (slow); enable in your config file
 N_PERM_IMPORTANCE_REPEATS  = 5    # permutation repeats inside permutation_importance
 
 
@@ -374,15 +374,63 @@ SUPPLEMENTARY_SUBDIR = 'supplementary'
 # pipeline reads this to distinguish "user set this" from "config.py default",
 # so it can apply its own MetaboAnalyst-matching defaults when the user has not
 # explicitly overridden LOG_TRANSFORM, SCALING, or SNR_FLOOR_ENABLED.
+# -- Experimental-unit manifest (audit addition) ----------------------------------
+# Optional CSV inside the experiment folder with columns file_path, class, colony
+# (+ optional plate, acquisition_order). When present it is the single source of
+# colony (CV group) identity; otherwise filename-topology grouping is used.
+METADATA_MANIFEST  = 'metadata_manifest.csv'   # used only if the file exists in the experiment folder
+EXPECTED_TECH_REPS = None   # e.g. 3 -> raise if a colony has a different count
+
+# -- Version 2 settings (see docs/CHANGES_v2.md) --------------------------------
+# Spectral grid: 'native' sums every instrument data point into the 0.5-Da bins
+# (recommended). 'linspace5000' is the original behaviour (spectra point-sampled
+# on a 5000-point grid; ~74% of 0.1-Da points unused) -- legacy reproduction only.
+SPECTRAL_RESAMPLING = 'native'
+# Unsupervised PCA (labels used only to describe the fitted structure).
+RUN_PCA = True
+N_PCA_COMPONENTS = 5
+# PLS-DA VIP: component-1 VIP (MetaboAnalyst 'Comp. 1' equivalent) is always
+# reported. The multi-component VIP uses A* latent variables, chosen as the argmax
+# of a leak-free, colony-grouped Q2 (StratifiedGroupKFold, refitted preprocessing).
+RUN_MULTICOMPONENT_VIP = True
+PLS_MAX_COMPONENTS = 8
+Q2_N_SPLITS = 3
+Q2_N_REPEATS = 5
+# Signal groups: adjacent 0.5-Da bins whose colony-mean profiles co-vary (r >=
+# SIGNAL_R_MIN) and whose raw profile shows one peak are annotated as one spectral
+# signal. Features remain 0.5-Da bins; the grouping is an annotation layer.
+RUN_SIGNAL_GROUPS = True
+SIGNAL_R_MIN = 0.9
+# Supplementary classification: leave-one-colony-out (pooled predictions).
+RUN_LOCO_CV = True
+# Exploratory colony-level permutation test (extras.py): classifier pre-specified.
+PERMUTATION_CLASSIFIER = 'Random Forest'
+# An invalid EXPERIMENT raises an error; set True only to restore the original
+# silent fallback to data/sample_experiment.
+ALLOW_SAMPLE_FALLBACK = False
+
 _json_keys: set = set()
-_config_json_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'config.json')
+# Settings file: the TOOLKIT_CONFIG environment variable (set by
+# `--config <file>` on the command line) or ./config.json in the repository root.
+_config_json_path = _os.environ.get('TOOLKIT_CONFIG') or _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)), 'config.json')
+CONFIG_FILE = _os.path.abspath(_config_json_path)
+UNKNOWN_CONFIG_KEYS = []
 if _os.path.exists(_config_json_path):
     with open(_config_json_path) as _f:
         _overrides = _json.load(_f)
     _g = globals()
     for _k, _v in _overrides.items():
-        if not _k.startswith('_') and _k in _g:
+        if _k.startswith('_'):
+            continue
+        if _k in _g:
             _g[_k] = _v
             _json_keys.add(_k)
-    del _g, _k, _v, _f, _overrides
+        else:
+            UNKNOWN_CONFIG_KEYS.append(_k)
+    if UNKNOWN_CONFIG_KEYS:
+        print(f"  [config] warning: unrecognised setting(s) ignored in {CONFIG_FILE}: {UNKNOWN_CONFIG_KEYS}")
+    del _g, _f, _overrides
+elif _os.environ.get('TOOLKIT_CONFIG'):
+    raise FileNotFoundError(f"Configuration file not found: {_config_json_path}")
 del _config_json_path, _os, _json

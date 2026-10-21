@@ -52,7 +52,7 @@ def fit_plsda(X, y_labels, n_components):
     return pls, T, y, Y, le.classes_
 
 
-def compute_vip(X, y_labels, n_components=1):
+def compute_vip(X, y_labels, n_components=1, tol=None, max_iter=None):
     """
     VIP scores aggregated across the first ``n_components`` PLS-DA latent variables.
 
@@ -80,7 +80,16 @@ def compute_vip(X, y_labels, n_components=1):
 
     # Clamp to a feasible rank (can't exceed features or n_samples-1).
     A = int(max(1, min(n_components, X.shape[1], X.shape[0] - 1)))
-    pls = PLSRegression(n_components=A, scale=False)
+    # tol / max_iter: NIPALS power-iteration settings. None keeps the scikit-learn
+    # defaults (tol=1e-6, max_iter=500) used for all original results. With the
+    # default tolerance, VIP differs from exact PLS2 solutions (ropls, mixOmics,
+    # pls::plsr) by up to ~1e-3; VALIDATED_PLS_TOL brings this below 1e-6.
+    kw = {}
+    if tol is not None:
+        kw['tol'] = tol
+    if max_iter is not None:
+        kw['max_iter'] = max_iter
+    pls = PLSRegression(n_components=A, scale=False, **kw)
     pls.fit(X, Y)
 
     T = pls.x_scores_       # (n_samples, A)
@@ -95,14 +104,14 @@ def compute_vip(X, y_labels, n_components=1):
     return vip
 
 
-def compute_vip_1comp(X, y_labels):
+def compute_vip_1comp(X, y_labels, tol=None, max_iter=None):
     """1-component VIP — exact MetaboAnalyst component-1 parity.
 
     Thin wrapper around ``compute_vip(..., n_components=1)``. This is the canonical
     VIP used inside the ensemble consensus / bootstrap / permutation null so that
     layer stays MetaboAnalyst-comparable regardless of the plotting components.
     """
-    return compute_vip(X, y_labels, n_components=1)
+    return compute_vip(X, y_labels, n_components=1, tol=tol, max_iter=max_iter)
 
 
 def compute_plsda_q2(X, y_labels, n_components, groups=None, n_splits=5,
@@ -362,3 +371,87 @@ def plot_vip(vip, mz, X, y_labels, n_top, experiment_name, out_path):
 
     fig.suptitle(f'Top {n_top} VIP Features -- {experiment_name}', fontsize=13)
     pub_savefig(out_path)
+
+
+# ── Validated PLS-DA VIP: two distinct, explicitly labelled analyses ─────────────
+# (A) VIP_REFERENCE  — component-1 VIP (compute_vip_1comp). Ranks features by their
+#     weight on the leading PLS2 direction. Numerically equivalent to the
+#     MetaboAnalystR "Comp. 1" VIP column (verified: top-50 50/50, Spearman 0.999999).
+# (B) VIP_MULTICOMPONENT — compute_vip(X, y, n_components=A*) with the published
+#     PLS2 definition (Wold et al. 1993):
+#         VIP_j = sqrt( p * sum_a SSY_a (w_aj/||w_a||)^2 / sum_a SSY_a ),
+#         SSY_a = ||t_a||^2 * ||q_a||^2  (Y sum of squares explained by component a,
+#                                         summed over all one-hot class columns),
+#     independently validated against ropls 1.42.0 and mixOmics 6.34.0
+#     (top-50 50/50 at A = 1, 2, 4, 8). A* is chosen by grouped_q2_profile below.
+# Tight NIPALS settings used by the validated workflow (see compute_vip).
+VALIDATED_PLS_TOL = 1e-14
+VALIDATED_PLS_MAX_ITER = 100000
+
+VIP_REFERENCE_LABEL = "component-1 VIP (MetaboAnalystR 'Comp. 1' equivalent)"
+VIP_MULTICOMPONENT_LABEL = "multi-component VIP (Wold PLS2 definition, A* by grouped Q2)"
+
+
+def _one_hot(y_codes, n_classes):
+    return np.eye(n_classes)[np.asarray(y_codes)]
+
+
+def grouped_q2_profile(X_binned, y_labels, groups, prep_steps, max_components=8,
+                       n_splits=3, n_repeats=5, random_state=42, splitter=None):
+    """Leakage-free, colony-grouped Q^2 for PLS-DA with 1..max_components LVs.
+
+    Unlike ``compute_plsda_q2`` (which cross-validates an already globally
+    preprocessed matrix), every fold here clones and re-fits the full
+    preprocessing chain ``prep_steps`` (filters, normalisation, transform,
+    scaling) on the TRAINING colonies only, then fits one PLS2 model with
+    ``max_components`` LVs. Predictions for a < max_components use the first a
+    components of that fit, which is algebraically identical to refitting with
+    a components (sequential NIPALS deflation).
+
+    Q^2(a) = 1 - PRESS(a) / TSS, pooled over folds, with TSS taken about each
+    training fold's class-indicator mean. Folds are StratifiedGroupKFold on the
+    colony groups, so a colony's technical replicates never straddle a split.
+
+    ``splitter`` (optional): any sklearn group-aware splitter, e.g.
+    ``LeaveOneGroupOut()`` for leave-one-colony-out; when given, it replaces
+    StratifiedGroupKFold and a single repeat is run. Default behaviour unchanged.
+
+    Returns
+    -------
+    dict with 'q2' (mean over repeats, shape (max_components,)), 'q2_repeats'
+    (n_repeats, max_components), 'best_n_components' (argmax of mean Q^2, the
+    pre-specified rule) and 'components' (1..max_components).
+    """
+    from sklearn.base import clone
+    from sklearn.pipeline import Pipeline
+    le = LabelEncoder()
+    y = le.fit_transform(y_labels)
+    K = len(le.classes_)
+    Y = _one_hot(y, K)
+    groups = np.asarray(groups)
+    if splitter is not None:
+        n_repeats = 1
+    q2_rep = np.full((n_repeats, max_components), np.nan)
+    for r in range(n_repeats):
+        sgkf = splitter if splitter is not None else StratifiedGroupKFold(
+            n_splits=n_splits, shuffle=True, random_state=random_state + r)
+        press = np.zeros(max_components)
+        tss = 0.0
+        for tr, te in sgkf.split(X_binned, y, groups):
+            prep = Pipeline([(n, clone(t)) for n, t in prep_steps])
+            Xtr = prep.fit_transform(X_binned[tr], y[tr])
+            Xte = prep.transform(X_binned[te])
+            A = int(min(max_components, Xtr.shape[0] - 1, Xtr.shape[1]))
+            pls = PLSRegression(n_components=A, scale=False).fit(Xtr, Y[tr])
+            x_mean = Xtr.mean(axis=0)
+            y_mean = Y[tr].mean(axis=0)
+            Xc = Xte - x_mean
+            for a in range(1, max_components + 1):
+                aa = min(a, A)
+                Y_hat = Xc @ pls.x_rotations_[:, :aa] @ pls.y_loadings_[:, :aa].T + y_mean
+                press[a - 1] += np.sum((Y[te] - Y_hat) ** 2)
+            tss += np.sum((Y[te] - y_mean) ** 2)
+        q2_rep[r] = 1.0 - press / tss
+    q2 = q2_rep.mean(axis=0)
+    return {'components': np.arange(1, max_components + 1), 'q2': q2,
+            'q2_repeats': q2_rep, 'best_n_components': int(np.argmax(q2) + 1)}

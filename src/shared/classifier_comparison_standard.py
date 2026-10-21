@@ -685,6 +685,33 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
         'in_ridge_top': membership['ridge'], 'in_vip_top': membership['vip'],
     })
 
+    # Model-family support (v2): the three linear models (SVM, LR, Ridge) give
+    # closely related solutions in the p >> n regime, so the six votes are also
+    # summarised as support from three families: linear, tree (RF, GB), PLS (VIP).
+    overlap_df['family_linear'] = membership['svm'] | membership['lr'] | membership['ridge']
+    overlap_df['family_tree'] = membership['rf'] | membership['gb']
+    overlap_df['family_pls'] = membership['vip']
+    overlap_df['n_families'] = overlap_df[['family_linear', 'family_tree', 'family_pls']].sum(axis=1)
+
+    # Full ranking table (v2): every feature, not only the >= 2-vote candidates,
+    # so that any m/z can be traced (importance, rank and top-N membership).
+    _rank = {m: pd.Series(-_imp_by_method[m]).rank(method='min').astype(int).values
+             for m in method_names}
+    _all = pd.DataFrame({'mz': mz})
+    for m in method_names:
+        _all[f'{m}_importance'] = _imp_by_method[m]
+        _all[f'{m}_rank'] = _rank[m]
+        _all[f'in_{m}_top'] = np.isin(np.arange(len(mz)), list(_tops_by_method[m]))
+    _all['n_methods'] = [counts.get(i, 0) for i in range(len(mz))]
+    _all['family_linear'] = _all[['in_svm_top', 'in_lr_top', 'in_ridge_top']].any(axis=1)
+    _all['family_tree'] = _all[['in_rf_top', 'in_gb_top']].any(axis=1)
+    _all['family_pls'] = _all['in_vip_top']
+    _all['n_families'] = _all[['family_linear', 'family_tree', 'family_pls']].sum(axis=1)
+    _all_path = os.path.join(out_dir, f'feature_rankings_{safe_name}.csv')
+    _all.sort_values(['n_methods', 'vip_rank'], ascending=[False, True]).to_csv(
+        _all_path, index=False, encoding='utf-8')
+    print(f"  Saved full feature rankings (all {len(mz)} features) -> {_all_path}")
+
     print(f"  Adding per-group attribution: mean intensity + Ridge one-vs-rest")
     # Normalise ridge.coef_ to shape (n_classes, n_features) in all cases.
     # Binary sklearn Ridge can return 1D (n_features,) or 2D (1, n_features)
@@ -814,7 +841,8 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
         n_sig = int((stats['q_value'][overlap_list] < 0.05).sum())
         units = stats.get('n_units_per_class', {})
         print(f"  Univariate {stats['test_name']} + BH-FDR: "
-              f"{n_sig}/{len(overlap_list)} candidates at q < 0.05"
+              f"{n_sig}/{len(overlap_list)} candidates at q < 0.05 "
+              f"(descriptive condition-plate screen on colony means)"
               + (f"  (n units/class: {units})" if units else ""))
     else:
         print("  [stats] X_norm not provided -- skipping univariate FDR columns")
@@ -843,7 +871,7 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
         null = overlap_permutation_null(
             X, y_labels, compute_vip_1comp, top_n=top_n,
             k_values=k_values, n_perm=n_overlap_perm, seed=random_state,
-            use_methods=use_methods, n_jobs=n_jobs,
+            use_methods=use_methods, n_jobs=n_jobs, groups=groups,
         )
         overlap_df['overlap_null_freq'] = null['per_feature_null_freq'][overlap_list]
         # NB: `counts` (observed votes) is computed by feature_importance_analysis
@@ -857,5 +885,5 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
             pk = empirical_p(obs_k, nk)
             nk_valid = nk[np.isfinite(nk)]
             mean_null = float(nk_valid.mean()) if nk_valid.size else float('nan')
-            print(f"      >= {k}: observed={obs_k:4d}  null_mean={mean_null:6.1f}  "
-                  f"p={pk:.4f}")
+            print(f"      >= {k}: observed={obs_k:4d}  shuffled mean={mean_null:6.1f}  "
+                  f"exceedance={pk:.3f} (exploratory; not a p-value)")
