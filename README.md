@@ -107,9 +107,11 @@ Copy `configs/standard.json`, set `EXPERIMENT`, and pass it with `--config`. You
 | `NORMALIZATION`, `LOG_TRANSFORM`, `SCALING` | `tic`, `log10`, `autoscale` | preprocessing, refitted inside every CV training fold |
 | `VARIANCE_PERCENTILE`, `ABUNDANCE_PERCENTILE`, `PREVALENCE_THRESHOLD` | 25, 5, 0.5 | feature filters |
 | `CV_FOLDS`, `N_CV_REPEATS` | 5 (auto-reduced to the number of colonies per class), 10 | colony-grouped CV |
-| `TOP_N_FEATURES` | 50 | top-N used for the ensemble count |
+| `TOP_N_FEATURES` | 50 | top-N used for the vote count and the family-aware consensus |
+| `CONSENSUS_RULE`, `CONSENSUS_MAX_WORST_FAMILY_RANK`, `CONSENSUS_MIN_FAMILIES_TOPK` | `n_families_topk`, 50, 2 | headline **cross-family consensus** rule used by the figure scripts (default `agg_n_families_topk >= 2`; stricter alternative `agg_worst_family_rank <= 50`) |
+| `SMALL_SAMPLE_GUARD_KEY` | `per_class` | colony count (smallest class, or legacy `total`) that switches on small-sample regularisation for the classifiers and importance fits |
 | `PLSDA_VIP_NUM_COMPONENTS` | 1 | component-1 VIP (MetaboAnalyst "Comp. 1" equivalent) |
-| `RUN_MULTICOMPONENT_VIP`, `PLS_MAX_COMPONENTS` | true, 8 | multi-component VIP with A* chosen by grouped Q² |
+| `RUN_MULTICOMPONENT_VIP`, `PLS_MAX_COMPONENTS`, `Q2_PARSIMONY_TOL` | true, 8, 0.05 | multi-component VIP with A* = smallest number of latent variables within `Q2_PARSIMONY_TOL` of the best grouped Q² |
 | `RUN_PCA`, `RUN_SIGNAL_GROUPS`, `RUN_LOCO_CV` | true | PCA; signal-group annotation; leave-one-colony-out |
 | `METADATA_MANIFEST`, `EXPECTED_TECH_REPS` | `metadata_manifest.csv`, none | replicate metadata |
 | `RUN_FEATURE_STABILITY`, `RUN_OVERLAP_PERMUTATION`, `RUN_PERMUTATION_IMPORTANCE`, `RUN_PLSDA_Q2` | false | slow optional analyses (see below) |
@@ -123,15 +125,16 @@ Unknown setting names are reported, not silently ignored.
 3. **PCA** (unsupervised). Explained variance, score plots of spectra and colony means, and, for each PC, the share of score variance due to condition-plate, colony (biological) and technical-replicate differences.
 4. **PLS-DA VIP**, two clearly labelled analyses:
    - (a) **component-1 VIP**, numerically equivalent to MetaboAnalyst's "Comp. 1" VIP;
-   - (b) **multi-component VIP** (Wold PLS2 definition) with A* latent variables. A* is chosen as the argmax of a colony-grouped Q² in which all preprocessing is refitted inside every fold.
+   - (b) **multi-component VIP** (Wold PLS2 definition) with A* latent variables. A* is the smallest number of latent variables whose colony-grouped Q² is within `Q2_PARSIMONY_TOL` (0.05) of the best (all preprocessing is refitted inside every fold); the raw argmax is also printed, and a warning is logged when it sits on the search boundary.
 5. **Classification**: six classifiers.
    - Principal: 3-fold colony-grouped CV (all preprocessing inside the folds), reporting accuracy, balanced accuracy, macro-F1 and confusion matrices.
    - Supplementary: leave-one-colony-out with pooled predictions.
 6. **Feature importance and consensus.** RF impurity, GB gain, |coefficients| of SVM, LR and Ridge, and component-1 VIP are computed on all data. For each feature the outputs are:
-   - `n_methods`: the original ensemble count of top-N memberships among these six;
+   - `n_methods`: the original vote count of top-N memberships among these six (descriptive; the votes are not independent);
+   - **cross-family consensus** (`agg_*` columns): methods are averaged within family (linear / tree / PLS) so each family casts one vote; `agg_worst_family_rank` is the worst of the three family ranks and `agg_n_families_topk` the number of families with the feature in their top-N. The figures mark features top-ranked in at least two families (`agg_n_families_topk >= 2`; configurable) as *Cross-family consensus*. `agg_rra_score` is a ranking score, not a p-value;
    - model-family support: linear (SVM/LR/Ridge), tree (RF/GB) and PLS (VIP), with `n_families`, because the three linear models give closely related solutions;
    - multi-component VIP rank;
-   - a descriptive univariate screen on colony means.
+   - a descriptive colony-level screen (`screen_F`, `screen_p`, `screen_q`). Light is aliased with plate, so these describe condition-plate separation, not a treatment effect, and no table is sorted by them.
 7. **Signal groups.** Adjacent 0.5-Da bins whose colony-mean profiles co-vary and whose raw profile shows a single peak are annotated as one spectral signal (e.g. bins 159.5–160.0 and 160.0–160.5 → one signal near m/z 160.1). Features stay 0.5-Da bins. The grouping is an annotation for interpretation and never silently merges features.
 
 ## Output files
@@ -142,10 +145,10 @@ All in `results/standard/<experiment>/`:
 |---|---|
 | `classifier_accuracy_<exp>.csv` | principal table: 3-fold grouped CV mean ± SD, LOCO accuracy / balanced accuracy / macro-F1, chance level, numbers of spectra and colonies |
 | `classifier_comparison_<exp>.png` | accuracy per fold, train vs test |
-| `feature_rankings_<exp>.csv` | **every** feature: importance and rank per method, top-N membership, `n_methods`, family support, multi-component VIP, signal group |
-| `feature_overlap_<exp>.csv` | candidates with ≥2 votes, plus univariate effect sizes and condition means |
+| `feature_rankings_<exp>.csv` | **every** feature: importance and rank per method, top-N membership, `n_methods`, family support, family-aware consensus (`agg_*`), multi-component VIP, signal group; sorted by `agg_worst_family_rank` |
+| `feature_overlap_<exp>.csv` | candidates with ≥2 votes **or** meeting the cross-family consensus rule, plus the colony-level screen (`screen_F/p/q`, `screen_test`), `agg_*` columns and condition means; sorted by `agg_worst_family_rank` |
 | `vip_<exp>.csv`, `vip_scores_<exp>.png` | component-1 and multi-component VIP |
-| `plsda_q2_profile_<exp>.csv` | grouped Q² for 1–8 latent variables (A* = argmax) |
+| `plsda_q2_profile_<exp>.csv` | grouped Q² for 1–8 latent variables (A* = parsimonious choice; see `Q2_PARSIMONY_TOL`) |
 | `pca_<exp>.png`, `pca_explained_variance_<exp>.csv`, `pca_scores_<exp>.csv`, `pca_top_loadings_<exp>.csv` | PCA |
 | `signal_groups_<exp>.csv` | bin → signal-group map (evidence in `supplementary/`) |
 | `spectrum_features_<exp>.png` | condition-mean spectra with candidate features marked |
@@ -157,14 +160,14 @@ All in `results/standard/<experiment>/`:
 
 ```bash
 python src/scripts/pca_overview.py experiment_a experiment_b experiment_c experiment_d      # PCA overview -> results/standard/pca_overview.png
-python src/scripts/vip_vs_nmethods.py experiment_a experiment_b experiment_c experiment_d   # ensemble count vs component-1 VIP -> results/standard/vip_vs_nmethods.png
+python src/scripts/vip_vs_nmethods.py experiment_a experiment_b experiment_c experiment_d   # vote count vs component-1 VIP, cross-family consensus ringed -> results/standard/vip_vs_nmethods.png
 ```
 
 **Single-experiment figures** (EXPERIMENT from `config.json`, or give the name; saved in `results/standard/<experiment>/`):
 
 ```bash
 python src/scripts/corroboration_figure.py my_experiment   # which methods select which m/z
-python src/scripts/condition_abundance.py my_experiment    # condition means of features with n_methods >= 4
+python src/scripts/condition_abundance.py my_experiment    # condition means of the cross-family-consensus features
 python src/scripts/condition_spectrum.py my_experiment     # condition-mean spectra with candidate features marked (HTML)
 ```
 
@@ -195,7 +198,7 @@ This uses the original 5000-point resampling and file-name grouping, with no v2 
 ## Interpreting the results
 
 - **Importance ≠ reproducibility ≠ chemical significance.** A high rank says a feature helps a model separate the conditions in this data set. Whether the signal is reproducible needs replicate, stability and spectral checks. Whether it means anything chemically needs identification (high-resolution MS, MS/MS, standards). At unit resolution, nominal m/z does not identify a compound.
-- **Agreement between methods is not proof.** The linear models are closely related, so several votes can come from one underlying solution. Report family support alongside `n_methods`.
+- **Agreement between methods is not proof.** The linear models are closely related, so several votes can come from one underlying solution. Prefer the family-aware `agg_*` columns (cross-family consensus) to `n_methods`.
 - **Design limits.** If each condition was grown on a single plate or enclosure, condition and plate effects cannot be separated, and condition differences are condition-plate associations. Shuffling labels between colonies then does not give a valid significance test, so shuffled-label results are exploratory exceedance proportions.
 - **Effective sample size** is the number of biological replicates (colonies), not the number of spectra.
 

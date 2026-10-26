@@ -46,6 +46,7 @@ from shared.classifier_comparison_standard import (
     logistic_regression, lda_classify, ridge_classify,
     plot_accuracy_comparison, feature_importance_analysis,
     make_preprocessor, auto_n_splits, grouped_permutation_importance,
+    guard_group_count,
 )
 from shared.grouping import make_groups, check_batch_confound, resolve_groups
 from shared.visualization import plot_spectrum_with_features
@@ -189,15 +190,17 @@ def main():
     print(f"  Normalization     : {config.NORMALIZATION}")
     print(f"  Transformation    : {config.LOG_TRANSFORM}")
     print(f"  Scaling           : {config.SCALING}")
-    X_norm = preprocess(X_filt.copy(), normalization=config.NORMALIZATION,
-                        log_transform=config.LOG_TRANSFORM, scaling='none')
-    # Single staged pass yields both the model matrix (normalised+transformed+scaled)
-    # and the LINEAR normalised matrix (pre-transform) the QC metrics require.
+    # Single staged pass yields the model matrix (normalised+transformed+scaled), the
+    # LINEAR normalised matrix (pre-transform) the QC metrics require, and the
+    # transformed-but-UNCENTRED matrix used for fold changes and group means.
+    # (preprocess(scaling='none') mean-centres, which breaks the sinh/pow inversion
+    # in feature_stats._to_linear for glog and sqrt.)
     _stages = preprocess(X_filt, normalization=config.NORMALIZATION,
                          log_transform=config.LOG_TRANSFORM,
                          scaling=config.SCALING, return_stages=True)
     X        = _stages['scaled']
     X_linear = _stages['normalized']
+    X_norm   = _stages['transformed']
 
     # -- 4a. PCA (unsupervised; v2) ---------------------------------------------
     if getattr(config, 'RUN_PCA', True):
@@ -237,6 +240,12 @@ def main():
         min_fraction_in_group=config.MIN_FRACTION_IN_GROUP,
     )
     n_splits = auto_n_splits(y_labels, groups, desired=config.CV_FOLDS)
+    # Colony count that decides the small-sample regularisation overrides: the
+    # smallest class (default), not the total across classes (legacy 'total').
+    n_guard = guard_group_count(y_labels, groups,
+                                getattr(config, 'SMALL_SAMPLE_GUARD_KEY', 'per_class'))
+    print(f"  Small-sample guards keyed on {getattr(config, 'SMALL_SAMPLE_GUARD_KEY', 'per_class')!r} "
+          f"colony count = {n_guard}")
     print(f"\n  CV scheme: leave-one-biological-replicate-out "
           f"(StratifiedGroupKFold, {n_splits} folds, {n_groups} colonies)")
 
@@ -291,15 +300,17 @@ def main():
         _q2 = grouped_q2_profile(X_binned, y_labels, groups, prep_steps, max_components=_maxc,
                                  n_splits=getattr(config, 'Q2_N_SPLITS', 3),
                                  n_repeats=getattr(config, 'Q2_N_REPEATS', 5),
-                                 random_state=config.RANDOM_SEED)
-        a_star = int(_q2['best_n_components'])
+                                 random_state=config.RANDOM_SEED,
+                                 parsimony_tol=getattr(config, 'Q2_PARSIMONY_TOL', 0.05))
+        a_star = int(_q2['parsimonious_n_components'])
         pd.DataFrame({'n_components': _q2['components'], 'grouped_q2_mean': _q2['q2'],
                       'grouped_q2_sd': _q2['q2_repeats'].std(axis=0)}).to_csv(
             os.path.join(out_dir, f'plsda_q2_profile_{safe_name}.csv'), index=False)
         vip_multi = compute_vip(X, y_labels, n_components=a_star, tol=VALIDATED_PLS_TOL,
                                 max_iter=VALIDATED_PLS_MAX_ITER)
         print(f"    Q^2 by LV: " + ', '.join(f"{a}:{q:.3f}" for a, q in zip(_q2['components'], _q2['q2'])))
-        print(f"    A* = {a_star} (argmax grouped Q^2)")
+        print(f"    A* = {a_star} (smallest A within {getattr(config, 'Q2_PARSIMONY_TOL', 0.05)} "
+              f"of the best grouped Q^2; raw argmax = {int(_q2['best_n_components'])})")
         _vip_tab = pd.DataFrame({'mz': mz, 'vip_comp1': vip,
                                  'vip_comp1_rank': pd.Series(-vip).rank(method='min').astype(int).values,
                                  f'vip_multi_A{a_star}': vip_multi,
@@ -329,7 +340,7 @@ def main():
                 X_binned, y_labels, n_splits=n_splits,
                 groups=groups, prep_steps=prep_steps,
                 n_repeats=n_repeats, return_metrics=True,
-                n_biological=n_groups,
+                n_biological=n_guard,
             )
             test_accs  = metrics['test_accuracy']
             train_accs = metrics['train_accuracy']
@@ -359,7 +370,7 @@ def main():
         _abbr = {'Random Forest': 'rf', 'SVM': 'svm', 'Gradient Boosting': 'gb',
                  'Logistic Regression': 'lr', 'LDA': 'lda', 'Ridge': 'ridge'}
         _loco, _conf = loco_table(X_binned, y_labels, groups, prep_steps,
-                                  methods=[_abbr[n] for n in results], n_biological=n_groups,
+                                  methods=[_abbr[n] for n in results], n_biological=n_guard,
                                   seed=config.RANDOM_SEED)
         _acc = _acc.merge(_loco, on='classifier', how='left')
         os.makedirs(supp_dir, exist_ok=True)
@@ -388,7 +399,8 @@ def main():
                          if enabled]
         run_classification_benchmark(
             X_binned, y_labels, groups, prep_steps, n_splits,
-            enabled_names, supp_dir, safe_name, experiment_name, config)
+            enabled_names, supp_dir, safe_name, experiment_name, config,
+            n_biological=n_guard)
 
     # -- 12. Feature Importance (descriptive, full-data) -------------------------
     print("\n[12/12] Feature Importance Overlap Analysis")
@@ -402,7 +414,7 @@ def main():
         n_boot=getattr(config, 'N_BOOTSTRAP', 200),
         compute_overlap_null=getattr(config, 'RUN_OVERLAP_PERMUTATION', False),
         n_overlap_perm=getattr(config, 'N_OVERLAP_PERMUTATIONS', 200),
-        random_state=config.RANDOM_SEED,
+        random_state=config.RANDOM_SEED, n_biological=n_guard,
     )
     # -- 12b. Permutation importance (B2: counters tree impurity bias) -----------
     if getattr(config, 'RUN_PERMUTATION_IMPORTANCE', True):
@@ -412,6 +424,7 @@ def main():
             models=('rf', 'gb'), n_splits=n_splits, n_repeats=1,
             n_perm_repeats=getattr(config, 'N_PERM_IMPORTANCE_REPEATS', 5),
             random_state=config.RANDOM_SEED, n_jobs=getattr(config, 'N_JOBS', -1),
+            n_biological=n_guard,
         )
         perm_path = os.path.join(out_dir, f"permutation_importance_{safe_name}.csv")
         perm_imp_df.to_csv(perm_path, index=False, encoding='utf-8')
@@ -456,8 +469,10 @@ def main():
                 _t.to_csv(_path, index=False, encoding='utf-8')
         overlap_df = pd.read_csv(_ovl_path)
 
+    from shared.rank_aggregation import config_consensus_mask
     plot_spectrum_with_features(X_binned, mz_binned, y_labels, overlap_df, experiment_name,
-                                out_path=os.path.join(out_dir, f"spectrum_features_{safe_name}.png"))
+                                out_path=os.path.join(out_dir, f"spectrum_features_{safe_name}.png"),
+                                high_mask=config_consensus_mask(overlap_df, config))
 
     print(f"\nDone in {time.time() - t_start:.0f} s. Results: {out_dir}")
 

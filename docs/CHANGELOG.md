@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased] — Review follow-up: cross-family consensus, neutral screen names
+
+### Changed
+- **Headline filter.** The figure scripts (`condition_abundance`, `condition_spectrum`,
+  `vip_vs_nmethods`, `corroboration_figure`, spectrum overview) no longer use
+  `n_methods >= 4`. They use the family-aware cross-family consensus
+  (`CONSENSUS_RULE`, default `agg_n_families_topk >= 2`; stricter option
+  `agg_worst_family_rank <= 50`) and label it "Cross-family consensus". `HIGH_CONFIDENCE_N_METHODS` is deprecated.
+- `feature_overlap_*.csv` also contains features that meet the consensus rule but have
+  < 2 votes; rows are sorted by `agg_worst_family_rank`, not by any p/q-value.
+- **Renamed** `p_value` -> `screen_p`, `q_value_BH` -> `screen_q`, `univariate_test` ->
+  `screen_test`; added `screen_F` (F, Welch t^2, or the rank-test statistic).
+- **Stability resampling** subsamples colonies without replacement within class
+  (`stratified_colony_resample(replace=False)`): no duplicated colonies, no lost class.
+- **A\*** (multi-component VIP) is the smallest LV count within `Q2_PARSIMONY_TOL` of the
+  best grouped Q^2 (`parsimonious_n_components`); `Q2_PARSIMONY_TOL = 0` restores argmax.
+- **Small-sample guards** are keyed on the smallest class (`SMALL_SAMPLE_GUARD_KEY =
+  'per_class'`) and now also applied to the importance fits, the stability/permutation
+  ensembles and the permutation importance. This changes CV accuracies for designs with
+  < 6 colonies per class. The guard's tree depth is floored (RF 3, GB 2) so it can no
+  longer collapse to depth-1 stumps on multi-class designs. `configs/manuscript_original.json` sets `'total'` and
+  `Q2_PARSIMONY_TOL = 0` to keep reproducing the original numbers.
+
+### Fixed
+- Fold changes and `mean_<group>` were computed from a mean-centred matrix, which
+  broke the glog/sqrt inversion (log2FC = 0 for every feature under glog).
+- Top-N tie-breaking is now stable (ties by ascending feature index).
+
 ## [Unreleased] — Leakage hardening, univariate FDR & selection stability
 
 ### Fixed (data leakage / pseudoreplication)

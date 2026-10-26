@@ -228,20 +228,25 @@ N_CV_REPEATS = 10
 #   'auto'     — Welch's t-test (2 groups) / one-way ANOVA (>2 groups)
 #   'ttest'    — same parametric tests as 'auto'
 #   'wilcoxon' — Wilcoxon rank-sum (2 groups) / Kruskal-Wallis (>2 groups)
-# Benjamini-Hochberg FDR q-values are always reported next to the raw p-values.
+# The output columns are deliberately neutral (screen_F, screen_p, screen_q): each
+# condition was grown on one plate/enclosure, so condition and plate are aliased and
+# colony-level tests describe condition-plate separation, not a treatment effect.
+# Benjamini-Hochberg screen_q is reported for scale only; the candidate table is
+# never sorted by it.
 UNIVARIATE_TEST = 'auto'
 
 # Replicate handling for the univariate test. True (default) averages each feature
 # within its biological group (colony) BEFORE testing, so technical replicates are
 # not pseudoreplicated and n = colonies per class (consistent with the grouped CV).
 # Set False to test at the raw per-spectrum level (anti-conservative; for comparison
-# only). The chosen unit is recorded in the table's 'univariate_test' column.
+# only). The chosen unit is recorded in the table's 'screen_test' column.
 UNIVARIATE_GROUP_AGGREGATE = True
 
 # ── Feature-selection stability (bootstrap) ───────────────────────────────────────
-# Resamples colonies with replacement, re-fits the ensemble, and reports how
-# often each feature is selected — out-of-sample evidence the candidate list is
-# reproducible. Slower (re-fits the ensemble N_BOOTSTRAP times). Set False to skip.
+# Subsamples colonies WITHOUT replacement within each class (2/3 of the colonies
+# per class, none duplicated), re-fits the ensemble, and reports how
+# often each feature is selected — a descriptive measure of sensitivity to colony
+# removal (subsamples overlap heavily and are not independent experiments). Slower (re-fits the ensemble N_BOOTSTRAP times). Set False to skip.
 RUN_FEATURE_STABILITY = False   # v2: optional (slow); enable in your config file
 N_BOOTSTRAP = 200
 
@@ -312,16 +317,40 @@ VIP_FILTER_THRESHOLD = 1.0  # keep features with VIP > this value
 # Permutation test — shuffles class labels 100 times to verify that
 # classification accuracy is significantly above chance. The most rigorous
 # validation for small MS datasets. Slow — allow ~2-5 minutes.
-# p < 0.05 confirms the model is learning real signal, not memorising noise.
+# The result is an EXPLORATORY exceedance proportion, not a p-value: each condition
+# was grown on one plate/enclosure, so colonies are not exchangeable across plates
+# and a shuffled-label test cannot establish a treatment effect.
 RUN_PERMUTATION_TEST = True   # set False to skip (saves ~2–5 min)
 N_PERMUTATIONS = 100
 
-# ── Ensemble confidence threshold ────────────────────────────────────────────────
-# Features with n_methods >= this value are reported as "high confidence" by
-# condition_abundance.py and condition_spectrum.py.
-# The paper reports results for features corroborated by 4 or more methods.
-# Set to 2 to inspect all overlap features.
+# ── Cross-family consensus (headline filter) ─────────────────────────────────────
+# Ridge, LR and SVM are closely related linear solutions, so a raw vote count
+# (n_methods) lets one family cast three of six votes. Methods are therefore
+# averaged WITHIN family (linear / tree / PLS) and the consensus is read from
+# family-level ranks (see shared/rank_aggregation.py):
+#   'n_families_topk'   : agg_n_families_topk   >= CONSENSUS_MIN_FAMILIES_TOPK  (default)
+#                         (a feature is in the top-TOP_N_FEATURES of >= k families)
+#   'worst_family_rank' : agg_worst_family_rank <= CONSENSUS_MAX_WORST_FAMILY_RANK
+#                         (a feature must rank well in EVERY family; strictest)
+# Used by condition_abundance.py, condition_spectrum.py, vip_vs_nmethods.py,
+# corroboration_figure.py and the spectrum overview. Features meeting the rule
+# are always included in feature_overlap_<exp>.csv, even with < 2 method votes.
+CONSENSUS_RULE = 'n_families_topk'   # features top-ranked in >= CONSENSUS_MIN_FAMILIES_TOPK families
+CONSENSUS_MAX_WORST_FAMILY_RANK = 50
+CONSENSUS_MIN_FAMILIES_TOPK = 2
+
+# DEPRECATED: the old vote-count threshold. No longer used by the figure scripts;
+# kept so existing config files that set it still load.
 HIGH_CONFIDENCE_N_METHODS = 4
+
+# ── Small-sample capacity guards ──────────────────────────────────────────────────
+# Which count decides whether classifiers/importance fits get the small-sample
+# regularisation overrides (shared.classifier_comparison_standard.small_sample_guards):
+#   'per_class' : the smallest number of colonies in any class (the quantity that
+#                 limits grouped CV; default)
+#   'total'     : total colonies across all classes (legacy; effectively never
+#                 triggers in multi-class designs; use to reproduce Table 1)
+SMALL_SAMPLE_GUARD_KEY = 'per_class'
 
 
 # ── Quality-control metrics (chemometric QC) ─────────────────────────────────
@@ -396,6 +425,9 @@ RUN_MULTICOMPONENT_VIP = True
 PLS_MAX_COMPONENTS = 8
 Q2_N_SPLITS = 3
 Q2_N_REPEATS = 5
+# A* = smallest number of LVs whose grouped Q2 is within this tolerance of the best
+# (parsimony; a raw argmax can sit on the search boundary). 0 restores the argmax.
+Q2_PARSIMONY_TOL = 0.05
 # Signal groups: adjacent 0.5-Da bins whose colony-mean profiles co-vary (r >=
 # SIGNAL_R_MIN) and whose raw profile shows one peak are annotated as one spectral
 # signal. Features remain 0.5-Da bins; the grouping is an annotation layer.

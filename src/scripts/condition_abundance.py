@@ -2,7 +2,9 @@
 condition_abundance.py
 ======================
 Plots a side-by-side heatmap of mean intensity and Ridge one-vs-rest
-coefficients for high-confidence ensemble features (n_methods >= MIN_N_METHODS).
+coefficients for the cross-family-consensus features (config.CONSENSUS_RULE:
+agg_worst_family_rank <= CONSENSUS_MAX_WORST_FAMILY_RANK by default, or
+agg_n_families_topk >= CONSENSUS_MIN_FAMILIES_TOPK).
 
 As of the per-group attribution update, the underlying numbers (mean_<group>,
 ridge_<group>) are written directly to feature_overlap_<experiment>.csv by
@@ -14,7 +16,7 @@ Usage (from the repository folder; run run_analysis.py first):
     python src/scripts/condition_abundance.py my_experiment   # or name the experiment
 The figure is saved next to the results, e.g. results/standard/my_experiment/.
 
-Configure PIPELINE and MIN_N_METHODS below.
+Configure PIPELINE below; the consensus rule is set in config.py.
 """
 
 import os
@@ -36,12 +38,13 @@ import config
 
 from shared.plot_style import apply_style, pub_savefig   # after the path setup
 from scripts._common import experiment_and_folder, report_missing
+from shared.rank_aggregation import config_consensus_mask, config_consensus_label
 
 apply_style()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 PIPELINE      = 'standard'    # 'standard' or 'r_comparable'
-MIN_N_METHODS = config.HIGH_CONFIDENCE_N_METHODS   # set in config.py
+CONSENSUS_TEXT = config_consensus_label(config)    # rule set in config.py
 # ──────────────────────────────────────────────────────────────────────────────
 
 BASE_DIR   = _ROOT
@@ -76,14 +79,23 @@ def main():
         return
     ridge_cols = expected_ridge_cols
 
-    candidates = df[df['n_methods'] >= MIN_N_METHODS].copy()
+    try:
+        mask = config_consensus_mask(df, config)
+    except KeyError as e:
+        print(e.args[0])
+        return
+    candidates = df[mask].copy()
     if candidates.empty:
-        print(f"No features with n_methods >= {MIN_N_METHODS}.")
+        print(f"No features meet the rule: {CONSENSUS_TEXT}.")
+        print(f"  best agg_worst_family_rank in the table = {df['agg_worst_family_rank'].min():.0f}; "
+              f"{int((df['agg_n_families_topk'] >= 2).sum())} feature(s) are top-ranked in >= 2 families. "
+              "Relax CONSENSUS_* in config.py to inspect more.")
         return
 
-    print(f"\nHigh-confidence features (n_methods >= {MIN_N_METHODS}):")
-    summary_cols = ['mz', 'n_methods', 'vip_score',
-                    'top_condition_mean', 'top_condition_ridge', 'ridge_direction']
+    print(f"\n{CONSENSUS_TEXT}:")
+    summary_cols = ['mz', 'agg_worst_family_rank', 'agg_n_families_topk', 'n_methods',
+                    'vip_score', 'top_condition_mean', 'top_condition_ridge',
+                    'ridge_direction']
     summary_cols = [c for c in summary_cols if c in candidates.columns]
     print(candidates[summary_cols].to_string(index=False))
 
@@ -95,7 +107,7 @@ def main():
         dpi=300,
     )
 
-    ylabels = [f"m/z {row['mz']:.2f}  (n={int(row['n_methods'])}, "
+    ylabels = [f"m/z {row['mz']:.2f}  (families in top-{config.TOP_N_FEATURES}={int(row['agg_n_families_topk'])}, "
                f"VIP={row['vip_score']:.2f})"
                for _, row in candidates.iterrows()]
 
@@ -146,7 +158,7 @@ def main():
     cb2.set_ticklabels(['Suppressed', '0', 'Elevated'])
 
     fig.suptitle(
-        f'{experiment}  |  High-confidence features (n_methods \u2265 {MIN_N_METHODS})',
+        f'{experiment}  |  {CONSENSUS_TEXT}',
         fontsize=11, y=1.01
     )
 

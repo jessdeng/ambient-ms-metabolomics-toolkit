@@ -10,9 +10,9 @@ The statistical-rigor layer added for publication. Three concerns are covered:
    Benjamini-Hochberg FDR to return q-values. This gives every reported
    candidate a p-value and a BH q-value instead of rank-overlap alone.
 
-2. **Out-of-sample selection stability.**
+2. **Sensitivity of the selection to colony removal.**
    `bootstrap_selection_frequency()` resamples *colonies* (biological groups)
-   with replacement, re-fits the whole ensemble on each bootstrap, and records
+   without replacement (stratified by class), re-fits the whole ensemble on each subsample, and records
    how often each feature lands in the consensus set. A feature selected in 95 %
    of bootstraps is reproducible; one that flips in and out is not. This is the
    multivariate analogue of an FDR for the ensemble ranking.
@@ -119,8 +119,8 @@ def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'
     Returns
     -------
     dict with arrays of length n_features:
-        p_value, q_value, log2_fold_change, fold_change, neg_log10_q,
-        top_group, bottom_group  (+ scalars 'test_name', 'aggregated',
+        p_value, q_value, statistic (F for ANOVA, t^2 for Welch, z^2 / H for the
+        rank tests), log2_fold_change, fold_change, neg_log10_q, top_group, bottom_group  (+ scalars 'test_name', 'aggregated',
         'n_units_per_class')
     """
     X_log = np.asarray(X_log, dtype=float)
@@ -171,13 +171,16 @@ def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'
             res = stats.ttest_ind(X_log[group_idx[0]], X_log[group_idx[1]],
                                   axis=0, equal_var=False)
             p = np.asarray(res.pvalue, dtype=float)
+            stat = np.asarray(res.statistic, dtype=float) ** 2     # t^2 (= F for 2 groups)
             test_name = "Welch t-test"
         else:
             p = np.full(n_features, np.nan)
+            stat = np.full(n_features, np.nan)
             a, b = X_log[group_idx[0]], X_log[group_idx[1]]
             for j in range(n_features):
                 try:
-                    p[j] = stats.ranksums(a[:, j], b[:, j]).pvalue
+                    r = stats.ranksums(a[:, j], b[:, j])
+                    p[j], stat[j] = r.pvalue, r.statistic ** 2          # z^2
                 except Exception:
                     p[j] = np.nan
             test_name = "Wilcoxon rank-sum"
@@ -191,12 +194,15 @@ def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'
         if parametric:
             res = stats.f_oneway(*groups_data, axis=0)
             p = np.asarray(res.pvalue, dtype=float)
+            stat = np.asarray(res.statistic, dtype=float)             # F
             test_name = "one-way ANOVA"
         else:
             p = np.full(n_features, np.nan)
+            stat = np.full(n_features, np.nan)
             for j in range(n_features):
                 try:
-                    p[j] = stats.kruskal(*[g[:, j] for g in groups_data]).pvalue
+                    r = stats.kruskal(*[g[:, j] for g in groups_data])
+                    p[j], stat[j] = r.pvalue, r.statistic               # H
                 except Exception:
                     p[j] = np.nan
             test_name = "Kruskal-Wallis"
@@ -215,6 +221,7 @@ def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'
     return {
         'p_value': p,
         'q_value': q,
+        'statistic': np.where(np.isfinite(stat), stat, np.nan),
         'fold_change': fold_change,
         'log2_fold_change': log2fc,
         'neg_log10_q': neg_log10_q,
@@ -229,7 +236,8 @@ def univariate_feature_stats(X_log, y_labels, log_transform='log10', test='auto'
 # ----------------------------------------------------------------------------- #
 # Ensemble helper (shared by stability + null)                                    #
 # ----------------------------------------------------------------------------- #
-def _ensemble_top_sets(Xp, y_enc, y_labels, top_n, seed, vip_fn, use_methods=None):
+def _ensemble_top_sets(Xp, y_enc, y_labels, top_n, seed, vip_fn, use_methods=None,
+                       guards=None):
     """Return a list of top-`top_n` index sets, one per *enabled* method.
 
     `use_methods` is an iterable of method keys drawn from
@@ -249,38 +257,44 @@ def _ensemble_top_sets(Xp, y_enc, y_labels, top_n, seed, vip_fn, use_methods=Non
         use_methods = set(_ALL_METHODS)
     else:
         use_methods = set(use_methods)
+    # Small-sample overrides (shared.classifier_comparison_standard.small_sample_guards)
+    # so the resampled models match the reported models. {} = defaults.
+    g = {k: dict(v) for k, v in (guards or {}).items()}
 
     importances = []
     if 'rf' in use_methods:
         try:
-            rf = RandomForestClassifier(n_estimators=100, random_state=seed).fit(Xp, y_enc)
+            rf = RandomForestClassifier(n_estimators=100, random_state=seed,
+                                        **g.get('rf', {})).fit(Xp, y_enc)
             importances.append(rf.feature_importances_)
         except Exception:
             pass
     if 'svm' in use_methods:
         try:
-            svm = SVC(kernel='linear', random_state=seed).fit(Xp, y_enc)
+            svm = SVC(kernel='linear', random_state=seed, **g.get('svm', {})).fit(Xp, y_enc)
             importances.append(np.abs(svm.coef_).mean(axis=0) if svm.coef_.ndim > 1
                                 else np.abs(svm.coef_).ravel())
         except Exception:
             pass
     if 'gb' in use_methods:
         try:
-            gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                            max_depth=3, random_state=seed).fit(Xp, y_enc)
+            gbp = dict(n_estimators=100, learning_rate=0.1, max_depth=3)
+            gbp.update(g.get('gb', {}))
+            gb = GradientBoostingClassifier(random_state=seed, **gbp).fit(Xp, y_enc)
             importances.append(gb.feature_importances_)
         except Exception:
             pass
     if 'lr' in use_methods:
         try:
-            lr = LogisticRegression(max_iter=1000, random_state=seed).fit(Xp, y_enc)
+            lr = LogisticRegression(max_iter=1000, random_state=seed,
+                                    **g.get('logreg', {})).fit(Xp, y_enc)
             importances.append(np.abs(lr.coef_).mean(axis=0) if lr.coef_.ndim > 1
                                else np.abs(lr.coef_).ravel())
         except Exception:
             pass
     if 'ridge' in use_methods:
         try:
-            ridge = RidgeClassifier().fit(Xp, y_enc)
+            ridge = RidgeClassifier(**g.get('ridge', {})).fit(Xp, y_enc)
             importances.append(np.abs(ridge.coef_).mean(axis=0) if ridge.coef_.ndim > 1
                                else np.abs(ridge.coef_).ravel())
         except Exception:
@@ -306,15 +320,52 @@ def _consensus_counts(top_sets, n_features):
 # ----------------------------------------------------------------------------- #
 # Group-aware bootstrap selection frequency                                       #
 # ----------------------------------------------------------------------------- #
+def stratified_colony_resample(y, groups, rng, replace=True, frac=2 / 3,
+                               min_per_class=2, max_tries=100):
+    """Row indices of one colony-level resample that always keeps every class.
+
+    The unit is the colony (biological group). Resampling is done WITHIN each
+    class, so class sizes are preserved and no class can disappear (a pooled
+    draw over all colonies drops at least one class in ~17% of resamples for
+    5 classes x 3 colonies).
+
+    replace=True  : within-class bootstrap; redrawn until >= ``min_per_class``
+                    distinct colonies per class are present.
+    replace=False : subsample round(frac * n_colonies) colonies per class
+                    (>= ``min_per_class``), no colony duplicated.
+    """
+    y, g = np.asarray(y), np.asarray(groups)
+    rows_of = {c: np.flatnonzero(g == c) for c in np.unique(g)}
+    picked = []
+    for c in np.unique(y):
+        cols = np.unique(g[y == c])
+        n = cols.size
+        if n < min_per_class:
+            raise ValueError(f"class {c!r} has {n} colonies (< {min_per_class})")
+        if replace:
+            for _ in range(max_tries):
+                draw = rng.choice(cols, size=n, replace=True)
+                if np.unique(draw).size >= min_per_class:
+                    break
+            else:
+                raise RuntimeError(
+                    f"could not draw {min_per_class} distinct colonies for class {c!r}")
+        else:
+            k = min(n, max(min_per_class, int(round(frac * n))))
+            draw = rng.choice(cols, size=k, replace=False)
+        picked.extend(draw.tolist())
+    return np.concatenate([rows_of[c] for c in picked])
+
+
 def _one_bootstrap(child_seed, X_filt_raw, y_labels, groups, uniq_groups,
                    preprocess_fn, vip_fn, normalization, log_transform, scaling,
-                   top_n, min_methods, n_features, use_methods):
-    """Single colony-bootstrap replicate. Returns a boolean (n_features,) mask
-    of features that cleared the consensus rule, or None if the resample was
-    degenerate. Pure function of `child_seed` -> deterministic & worker-safe."""
+                   top_n, min_methods, n_features, use_methods, guards=None):
+    """Single colony-subsample replicate (stratified by class, WITHOUT replacement:
+    no colony is duplicated). Returns a boolean (n_features,) mask of features that
+    cleared the consensus rule, or None if the resample was degenerate. Pure
+    function of `child_seed` -> deterministic & worker-safe."""
     rng = np.random.default_rng(child_seed)
-    drawn = rng.choice(uniq_groups, size=uniq_groups.size, replace=True)
-    idx = np.concatenate([np.where(groups == g)[0] for g in drawn])
+    idx = stratified_colony_resample(y_labels, groups, rng, replace=False)
     yb = y_labels[idx]
     if np.unique(yb).size < 2:
         return None
@@ -324,7 +375,7 @@ def _one_bootstrap(child_seed, X_filt_raw, y_labels, groups, uniq_groups,
     # Independent integer seed for the estimators, drawn from this worker's rng.
     model_seed = int(rng.integers(0, 2**31 - 1))
     top_sets = _ensemble_top_sets(Xb, yb_enc, yb, top_n, model_seed, vip_fn,
-                                  use_methods)
+                                  use_methods, guards)
     if len(top_sets) < 2:
         return None
     counts = _consensus_counts(top_sets, n_features)
@@ -335,13 +386,14 @@ def bootstrap_selection_frequency(X_filt_raw, y_labels, groups, preprocess_fn,
                                   vip_fn, normalization='tic',
                                   log_transform='log10', scaling='autoscale',
                                   top_n=50, min_methods=2, n_boot=200, seed=42,
-                                  use_methods=None, n_jobs=-1):
+                                  use_methods=None, n_jobs=-1, guards=None):
     """Fraction of colony-bootstrap resamples in which each feature is selected.
 
     A feature is 'selected' in a bootstrap if it appears in the top-`top_n` of
     at least `min_methods` of the ENABLED ensemble methods (see `use_methods`) —
     the same consensus rule used for the reported list. Colonies (unique
-    `groups`) are resampled WITH replacement so the unit of resampling is the
+    `groups`) are subsampled WITHOUT replacement, within class (2/3 of the colonies
+    per class, never fewer than 2; no colony is duplicated), so the unit of resampling is the
     biological replicate, never the technical replicate (consistent with the
     grouped CV). Preprocessing is re-fit on each bootstrap (no full-data leak).
 
@@ -382,7 +434,7 @@ def bootstrap_selection_frequency(X_filt_raw, y_labels, groups, preprocess_fn,
         delayed(_one_bootstrap)(
             cs, X_filt_raw, y_labels, groups, uniq_groups, preprocess_fn, vip_fn,
             normalization, log_transform, scaling, top_n, min_methods,
-            n_features, use_methods)
+            n_features, use_methods, guards)
         for cs in child_seeds
     )
 
@@ -401,7 +453,7 @@ def bootstrap_selection_frequency(X_filt_raw, y_labels, groups, preprocess_fn,
 # Label-permutation null for the overlap counts                                   #
 # ----------------------------------------------------------------------------- #
 def _one_permutation(child_seed, X_scaled, y_labels, vip_fn, top_n, k_values,
-                     n_features, use_methods, groups=None):
+                     n_features, use_methods, groups=None, guards=None):
     """Single label-permutation replicate. Returns (per_k_counts_dict,
     feature_hit_mask) or None if degenerate. Pure function of `child_seed`."""
     rng = np.random.default_rng(child_seed)
@@ -414,7 +466,7 @@ def _one_permutation(child_seed, X_scaled, y_labels, vip_fn, top_n, k_values,
     yp_enc = LabelEncoder().fit_transform(yp)
     model_seed = int(rng.integers(0, 2**31 - 1))
     top_sets = _ensemble_top_sets(X_scaled, yp_enc, yp, top_n, model_seed, vip_fn,
-                                  use_methods)
+                                  use_methods, guards)
     if len(top_sets) < 2:
         return None
     counts = _consensus_counts(top_sets, n_features)
@@ -425,7 +477,7 @@ def _one_permutation(child_seed, X_scaled, y_labels, vip_fn, top_n, k_values,
 
 def overlap_permutation_null(X_scaled, y_labels, vip_fn, top_n=50,
                              k_values=(2, 3, 4, 5, 6), n_perm=200, seed=42,
-                             use_methods=None, n_jobs=-1, groups=None):
+                             use_methods=None, n_jobs=-1, groups=None, guards=None):
     """Exploratory reference distribution of the cross-method overlap under
     shuffled labels.
 
@@ -468,7 +520,7 @@ def overlap_permutation_null(X_scaled, y_labels, vip_fn, top_n=50,
     results = Parallel(n_jobs=n_jobs)(
         delayed(_one_permutation)(
             cs, X_scaled, y_labels, vip_fn, top_n, k_values, n_features,
-            use_methods, groups)
+            use_methods, groups, guards)
         for cs in child_seeds
     )
 

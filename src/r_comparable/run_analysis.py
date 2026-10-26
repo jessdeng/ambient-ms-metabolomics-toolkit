@@ -169,15 +169,14 @@ def main():
     print(f"  Normalization  : {config.NORMALIZATION}")
     print(f"  Transformation : {_LOG_TRANSFORM}")
     print(f"  Scaling        : {_SCALING}")
-    X_norm = preprocess(X_filt.copy(), normalization=config.NORMALIZATION,
-                        log_transform=_LOG_TRANSFORM, scaling='none')
-    # Single staged pass yields both the model matrix (normalised+transformed+scaled)
-    # and the LINEAR normalised matrix (pre-transform) the QC metrics require.
+    # Single staged pass: model matrix, LINEAR normalised matrix (QC metrics) and the
+    # transformed-but-UNCENTRED matrix (fold changes; scaling='none' would centre it).
     _stages = preprocess(X_filt, normalization=config.NORMALIZATION,
                          log_transform=_LOG_TRANSFORM, scaling=_SCALING,
                          return_stages=True)
     X        = _stages['scaled']
     X_linear = _stages['normalized']
+    X_norm   = _stages['transformed']
 
     # ── 4b. Analytical QC (technical %CV, biological %CV, technical/total SD ratio) ──
     if getattr(config, 'RUN_QC_METRICS', False):

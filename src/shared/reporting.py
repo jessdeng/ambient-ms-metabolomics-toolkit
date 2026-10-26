@@ -161,7 +161,7 @@ def _estimator_factories(enabled_names, n_biological, random_state):
 
 def run_classification_benchmark(X_binned, y_labels, groups, prep_steps, n_splits,
                                  enabled_names, out_dir, safe_name, experiment_name,
-                                 config, log=print):
+                                 config, log=print, n_biological=None):
     """
     Pooled leave-one-colony-out out-of-fold benchmark for each enabled classifier.
 
@@ -176,7 +176,8 @@ def run_classification_benchmark(X_binned, y_labels, groups, prep_steps, n_split
     pandas.DataFrame  one row per classifier with the scalar metrics and the
                       per-class recall/precision columns.
     """
-    n_biological = len(np.unique(groups))
+    if n_biological is None:      # legacy: total colonies (see guard_group_count)
+        n_biological = len(np.unique(groups))
     random_state = int(getattr(config, 'RANDOM_SEED', 42))
     factories = _estimator_factories(enabled_names, n_biological, random_state)
     if not factories:
