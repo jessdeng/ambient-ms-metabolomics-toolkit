@@ -521,17 +521,23 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     _corr_df.to_csv(_corr_path, encoding='utf-8')
     print(f"  Saved model-importance Spearman matrix -> {_corr_path}")
 
-    _tops_by_method = {m: set(np.argsort(im)[::-1][:top_n])
+    # Stable top-N (ties by feature index), as in the standard pipeline.
+    _tops_by_method = {m: set(np.lexsort((np.arange(im.size), -im))[:top_n].tolist())
                        for m, im in _imp_by_method.items()}
     tops = [_tops_by_method[m] for m in ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']]
     counts = Counter(idx for m in _enabled for idx in _tops_by_method[m])
+
+    # Family-aware consensus (one vote per family); see shared/rank_aggregation.py.
+    from shared.rank_aggregation import aggregate_ranks, config_consensus_mask
+    _agg = aggregate_ranks({m: _imp_by_method[m] for m in _active}, top_k=top_n)
+    _consensus_idx = set(np.flatnonzero(config_consensus_mask(_agg, _cfg_fi)).tolist())
 
     overlap_2plus = {idx for idx, c in counts.items() if c >= 2}
     overlap_3plus = {idx for idx, c in counts.items() if c >= 3}
     print(f"  Features in at least 2 of 6 methods: {len(overlap_2plus)}")
     print(f"  Features in at least 3 of 6 methods: {len(overlap_3plus)}")
 
-    overlap_list = sorted(overlap_2plus)
+    overlap_list = sorted(overlap_2plus | _consensus_idx)
     method_names = ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']
     membership   = {name: np.array([idx in top for idx in overlap_list], dtype=bool)
                     for name, top in zip(method_names, tops)}
@@ -552,6 +558,9 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
         'in_ridge_top':     membership['ridge'],
         'in_vip_top':       membership['vip'],
     })
+
+    for _c in _agg.columns:
+        overlap_df[_c] = _agg[_c].values[overlap_list]
 
     print(f"  Adding per-group attribution: mean intensity + Ridge one-vs-rest")
     if ridge.coef_.ndim == 1:
@@ -617,11 +626,9 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
         random_state=random_state,
     )
 
-    if 'q_value_BH' in overlap_df.columns:
-        overlap_df = overlap_df.sort_values(['q_value_BH', 'n_methods'],
-                                            ascending=[True, False])
-    else:
-        overlap_df = overlap_df.sort_values('n_methods', ascending=False)
+    # Ordered by the family-aware consensus; never by the colony-level screen stats.
+    overlap_df = overlap_df.sort_values(['agg_worst_family_rank', 'agg_mean_family_rank',
+                                         'n_methods'], ascending=[True, True, False])
     csv_path   = os.path.join(out_dir, f'feature_overlap_{safe_name}.csv')
     overlap_df.to_csv(csv_path, index=False, encoding='utf-8')
     print(f"  Saved -> {csv_path}")

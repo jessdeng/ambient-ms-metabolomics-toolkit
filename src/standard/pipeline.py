@@ -396,8 +396,29 @@ def _one_hot(y_codes, n_classes):
     return np.eye(n_classes)[np.asarray(y_codes)]
 
 
+def parsimonious_n_components(q2, tol=0.05):
+    """Smallest number of latent variables whose Q^2 is within ``tol`` of the best.
+
+    A raw argmax over a short, noisy profile can land on the search boundary (the
+    shipped F11A profile peaks at A=8 = PLS_MAX_COMPONENTS although A=3 is within
+    0.03 of it). ``tol=0`` reproduces the argmax. A warning is logged when the
+    maximum sits on the upper boundary of the range searched.
+    """
+    import logging
+    q2 = np.asarray(q2, dtype=float)
+    if not np.isfinite(q2).any():
+        return 1
+    best = int(np.nanargmax(q2))
+    if best == q2.size - 1 and q2.size > 1:
+        logging.getLogger('ms_toolkit').warning(
+            "grouped Q2 is maximal at the search boundary (A=%d); widen "
+            "PLS_MAX_COMPONENTS or rely on the parsimonious choice", best + 1)
+    return int(np.flatnonzero(q2 >= np.nanmax(q2) - float(tol))[0]) + 1
+
+
 def grouped_q2_profile(X_binned, y_labels, groups, prep_steps, max_components=8,
-                       n_splits=3, n_repeats=5, random_state=42, splitter=None):
+                       n_splits=3, n_repeats=5, random_state=42, splitter=None,
+                       parsimony_tol=0.05):
     """Leakage-free, colony-grouped Q^2 for PLS-DA with 1..max_components LVs.
 
     Unlike ``compute_plsda_q2`` (which cross-validates an already globally
@@ -419,8 +440,9 @@ def grouped_q2_profile(X_binned, y_labels, groups, prep_steps, max_components=8,
     Returns
     -------
     dict with 'q2' (mean over repeats, shape (max_components,)), 'q2_repeats'
-    (n_repeats, max_components), 'best_n_components' (argmax of mean Q^2, the
-    pre-specified rule) and 'components' (1..max_components).
+    (n_repeats, max_components), 'best_n_components' (argmax of mean Q^2),
+    'parsimonious_n_components' (smallest A within ``parsimony_tol`` of the best;
+    see ``parsimonious_n_components``) and 'components' (1..max_components).
     """
     from sklearn.base import clone
     from sklearn.pipeline import Pipeline
@@ -454,4 +476,5 @@ def grouped_q2_profile(X_binned, y_labels, groups, prep_steps, max_components=8,
         q2_rep[r] = 1.0 - press / tss
     q2 = q2_rep.mean(axis=0)
     return {'components': np.arange(1, max_components + 1), 'q2': q2,
-            'q2_repeats': q2_rep, 'best_n_components': int(np.argmax(q2) + 1)}
+            'q2_repeats': q2_rep, 'best_n_components': int(np.argmax(q2) + 1),
+            'parsimonious_n_components': parsimonious_n_components(q2, parsimony_tol)}

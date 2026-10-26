@@ -252,6 +252,12 @@ def make_preprocessor(normalization='tic', log_transform='log10',
 
 # -- Small-sample capacity guards ------------------------------------------------
 SMALL_N_THRESHOLD = 6   # biological groups below which capacity is constrained
+# Tree-depth bounds used by the guard. A depth-1 stump has 2 leaves and cannot
+# partition a K-class problem (K=5 needs >= 5 leaves), so the floors are 3 for RF
+# (8 leaves) and 2 for GB (K one-vs-rest trees per stage, 4 leaves each). Capacity is
+# still limited by the depth ceiling, min_samples_leaf and min_samples_split.
+RF_MIN_DEPTH, RF_MAX_DEPTH = 3, 3
+GB_MIN_DEPTH, GB_MAX_DEPTH = 2, 2
 
 
 def small_sample_guards(n_biological, threshold=SMALL_N_THRESHOLD):
@@ -262,7 +268,8 @@ def small_sample_guards(n_biological, threshold=SMALL_N_THRESHOLD):
     unbounded trees and unregularised linear models can fit every training point
     (train accuracy -> 1.0) and report misleading test scores on the handful of
     held-out groups. This bounds tree depth / leaf size and tightens linear
-    regularisation in that regime. Returns a dict keyed by model tag; every value
+    regularisation in that regime. Tree depth is floored (RF >= 3, GB >= 2) so a
+    multi-class problem is never reduced to decision stumps. Returns a dict keyed by model tag; every value
     is an empty dict when ``n_biological`` is unknown or >= ``threshold`` (so the
     published defaults are preserved on adequately-powered datasets).
     """
@@ -272,16 +279,35 @@ def small_sample_guards(n_biological, threshold=SMALL_N_THRESHOLD):
     n = int(n_biological)
     if n >= threshold:
         return empty
-    leaf  = max(2, n // 4)                 # >= 2 samples per leaf
-    depth = max(1, min(3, n - 2))          # shallow trees only
+    leaf     = max(2, n // 4)              # >= 2 samples per leaf
+    rf_depth = max(RF_MIN_DEPTH, min(RF_MAX_DEPTH, n - 2))   # shallow, but never a stump
+    gb_depth = max(GB_MIN_DEPTH, min(GB_MAX_DEPTH, rf_depth))
     return {
-        'rf':     {'max_depth': depth, 'min_samples_leaf': leaf,
+        'rf':     {'max_depth': rf_depth, 'min_samples_leaf': leaf,
                    'min_samples_split': max(2, leaf + 1)},
-        'gb':     {'max_depth': max(1, min(2, depth)), 'min_samples_leaf': leaf},
+        'gb':     {'max_depth': gb_depth, 'min_samples_leaf': leaf},
         'svm':    {'C': 0.1},              # stronger margin regularisation
         'logreg': {'C': 0.1},
         'ridge':  {'alpha': 10.0},
     }
+
+
+def guard_group_count(y_labels, groups, key='per_class'):
+    """The colony count that decides whether ``small_sample_guards`` apply.
+
+    'per_class' (default): the smallest number of colonies in any class. This is the
+        quantity that limits grouped CV and the stability of a class's fit.
+    'total'  (legacy): colonies summed over all classes. With >= 6 colonies in total
+        (always true for 5 classes x 3 colonies) the guards never trigger, so the CV
+        and importance models ran with unconstrained defaults on 3 colonies/class.
+    """
+    y_labels = np.asarray(y_labels)
+    groups = np.asarray(groups)
+    if key == 'total':
+        return int(np.unique(groups).size)
+    if key != 'per_class':
+        raise ValueError(f"SMALL_SAMPLE_GUARD_KEY must be 'per_class' or 'total', got {key!r}")
+    return int(min(np.unique(groups[y_labels == c]).size for c in np.unique(y_labels)))
 
 
 def auto_n_splits(y_labels, groups, desired=5):
@@ -362,7 +388,7 @@ def _run_grouped_cv(estimator, X_binned, y, groups, prep_steps, n_splits,
 def grouped_permutation_importance(X_binned, y_labels, groups, prep_steps, mz,
                                    models=('rf', 'gb'), n_splits=3, n_repeats=1,
                                    n_perm_repeats=5, scoring='balanced_accuracy',
-                                   random_state=_SEED, n_jobs=-1):
+                                   random_state=_SEED, n_jobs=-1, n_biological=None):
     """Held-out permutation importance under grouped CV (B2 — counters impurity bias).
 
     Tree-model ``feature_importances_`` is impurity (Gini/MSE) based and is biased
@@ -400,12 +426,13 @@ def grouped_permutation_importance(X_binned, y_labels, groups, prep_steps, mz,
     y = _encode(y_labels)
     groups = np.asarray(groups)
     n_features = X_binned.shape[1]
+    _g = small_sample_guards(n_biological)      # same overrides as the CV / importance fits
+    _gb_kw = dict(n_estimators=100, learning_rate=0.1, max_depth=3)
+    _gb_kw.update(_g['gb'])
     est_factory = {
-        'rf': lambda: RandomForestClassifier(n_estimators=100,
-                                             random_state=random_state),
-        'gb': lambda: GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                                 max_depth=3,
-                                                 random_state=random_state),
+        'rf': lambda: RandomForestClassifier(n_estimators=100, random_state=random_state,
+                                             **_g['rf']),
+        'gb': lambda: GradientBoostingClassifier(random_state=random_state, **_gb_kw),
     }
     models = [m for m in models if m in est_factory]
     fold_imp = {m: [] for m in models}
@@ -593,19 +620,25 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
                                 univariate_test='auto',
                                 compute_stability=False, n_boot=200,
                                 compute_overlap_null=False, n_overlap_perm=200,
-                                random_state=_SEED):
+                                random_state=_SEED, n_biological=None):
     """
     Final ensemble feature ranking. Fits RF, SVM, GB, LR, Ridge and PLS-DA VIP
     on the FULL preprocessed dataset and reports features appearing in the top
-    `top_n` of >=2 of the 6 methods.
+    `top_n` of >=2 of the 6 methods, plus any feature meeting the family-aware
+    cross-family consensus rule (config.CONSENSUS_*; see shared/rank_aggregation.py).
+
+    ``n_biological`` is the colony count from ``guard_group_count``; when given, the
+    fits use the same ``small_sample_guards`` as the cross-validated classifiers
+    (None = unguarded defaults, the legacy behaviour).
 
     This is the reported candidate list, not a generalisation estimate, so it is
     fit on all data by design. `X` is the fully preprocessed (scaled) matrix.
 
     Statistical-rigor columns (added):
-      * Univariate fold-change, p-value and Benjamini-Hochberg q-value
-        (computed on `X_norm`, the unscaled log-intensity matrix) when X_norm
-        is provided.
+      * Colony-level screen (fold change, `screen_F`, `screen_p`, `screen_q`)
+        computed on `X_norm`, the unscaled transformed matrix, when X_norm is
+        provided. Neutral names on purpose: condition and plate are aliased, so
+        these are descriptive screens, and the table is never sorted by them.
       * `selection_frequency` — colony-bootstrap stability — when
         compute_stability=True and X_filt_raw + groups are supplied.
       * `overlap_null_freq` — per-feature label-permutation selection rate — and
@@ -616,20 +649,28 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     y = le.fit_transform(y_labels)
     classes = le.classes_
 
-    rf = RandomForestClassifier(n_estimators=100, random_state=_SEED); rf.fit(X, y)
+    guards = small_sample_guards(n_biological)
+    if any(guards.values()):
+        print(f"  [guards] small-sample overrides active for the importance fits "
+              f"(n_biological={n_biological})")
+
+    rf = RandomForestClassifier(n_estimators=100, random_state=_SEED,
+                                **guards['rf']); rf.fit(X, y)
     rf_imp = rf.feature_importances_
 
-    svm = SVC(kernel='linear', random_state=_SEED); svm.fit(X, y)
+    svm = SVC(kernel='linear', random_state=_SEED, **guards['svm']); svm.fit(X, y)
     svm_imp = np.abs(svm.coef_).mean(axis=0) if svm.coef_.ndim > 1 else np.abs(svm.coef_).ravel()
 
-    gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1,
-                                    max_depth=3, random_state=_SEED); gb.fit(X, y)
+    _gb_kw = dict(n_estimators=100, learning_rate=0.1, max_depth=3)
+    _gb_kw.update(guards['gb'])
+    gb = GradientBoostingClassifier(random_state=_SEED, **_gb_kw); gb.fit(X, y)
     gb_imp = gb.feature_importances_
 
-    lr = LogisticRegression(max_iter=1000, random_state=_SEED); lr.fit(X, y)
+    lr = LogisticRegression(max_iter=1000, random_state=_SEED,
+                            **guards['logreg']); lr.fit(X, y)
     lr_imp = np.abs(lr.coef_).mean(axis=0) if lr.coef_.ndim > 1 else np.abs(lr.coef_).ravel()
 
-    ridge = RidgeClassifier(); ridge.fit(X, y)
+    ridge = RidgeClassifier(**guards['ridge']); ridge.fit(X, y)
     ridge_imp = np.abs(ridge.coef_).mean(axis=0) if ridge.coef_.ndim > 1 else np.abs(ridge.coef_).ravel()
 
     vip_imp = compute_vip_1comp(X, y_labels)
@@ -656,17 +697,28 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     _corr_df.to_csv(_corr_path, encoding='utf-8')
     print(f"  Saved model-importance Spearman matrix -> {_corr_path}")
 
-    _tops_by_method = {m: set(np.argsort(im)[::-1][:top_n])
+    # Stable top-N: ties are broken by feature index (ascending m/z), not by the
+    # arbitrary order argsort()[::-1] gives (which favours high indices).
+    _tops_by_method = {m: set(np.lexsort((np.arange(im.size), -im))[:top_n].tolist())
                        for m, im in _imp_by_method.items()}
     tops = [_tops_by_method[m] for m in ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']]
     counts = Counter(idx for m in _enabled for idx in _tops_by_method[m])
+
+    # Family-aware consensus: each family (linear / tree / PLS) casts ONE vote.
+    from shared.rank_aggregation import aggregate_ranks, config_consensus_mask
+    _agg = aggregate_ranks({m: _imp_by_method[m] for m in _active}, top_k=top_n)
+    _consensus_idx = set(np.flatnonzero(config_consensus_mask(_agg, _cfg_fi)).tolist())
 
     overlap_2plus = {idx for idx, c in counts.items() if c >= 2}
     overlap_3plus = {idx for idx, c in counts.items() if c >= 3}
     print(f"  Features in at least 2 of 6 methods: {len(overlap_2plus)}")
     print(f"  Features in at least 3 of 6 methods: {len(overlap_3plus)}")
+    print(f"  Cross-family consensus features ({getattr(_cfg_fi, 'CONSENSUS_RULE', 'n_families_topk')}): "
+          f"{len(_consensus_idx)}  "
+          f"(best worst-family rank = {int(_agg.agg_worst_family_rank.min())}; "
+          f"{int((_agg.agg_n_families_topk >= 2).sum())} features top-{top_n} in >= 2 families)")
 
-    overlap_list = sorted(overlap_2plus)
+    overlap_list = sorted(overlap_2plus | _consensus_idx)
     method_names = ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']
     membership = {name: np.array([idx in top for idx in overlap_list], dtype=bool)
                   for name, top in zip(method_names, tops)}
@@ -688,10 +740,13 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
     # Model-family support (v2): the three linear models (SVM, LR, Ridge) give
     # closely related solutions in the p >> n regime, so the six votes are also
     # summarised as support from three families: linear, tree (RF, GB), PLS (VIP).
-    overlap_df['family_linear'] = membership['svm'] | membership['lr'] | membership['ridge']
-    overlap_df['family_tree'] = membership['rf'] | membership['gb']
-    overlap_df['family_pls'] = membership['vip']
+    _mem = {m: membership[m] & (m in _enabled) for m in membership}   # enabled methods only
+    overlap_df['family_linear'] = _mem['svm'] | _mem['lr'] | _mem['ridge']
+    overlap_df['family_tree'] = _mem['rf'] | _mem['gb']
+    overlap_df['family_pls'] = _mem['vip']
     overlap_df['n_families'] = overlap_df[['family_linear', 'family_tree', 'family_pls']].sum(axis=1)
+    for _c in _agg.columns:
+        overlap_df[_c] = _agg[_c].values[overlap_list]
 
     # Full ranking table (v2): every feature, not only the >= 2-vote candidates,
     # so that any m/z can be traced (importance, rank and top-N membership).
@@ -703,12 +758,17 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
         _all[f'{m}_rank'] = _rank[m]
         _all[f'in_{m}_top'] = np.isin(np.arange(len(mz)), list(_tops_by_method[m]))
     _all['n_methods'] = [counts.get(i, 0) for i in range(len(mz))]
-    _all['family_linear'] = _all[['in_svm_top', 'in_lr_top', 'in_ridge_top']].any(axis=1)
-    _all['family_tree'] = _all[['in_rf_top', 'in_gb_top']].any(axis=1)
-    _all['family_pls'] = _all['in_vip_top']
+    _all['family_linear'] = _all[[f'in_{m}_top' for m in ('svm', 'lr', 'ridge') if m in _enabled]].any(axis=1) \
+        if {'svm', 'lr', 'ridge'} & _enabled else False
+    _all['family_tree'] = _all[[f'in_{m}_top' for m in ('rf', 'gb') if m in _enabled]].any(axis=1) \
+        if {'rf', 'gb'} & _enabled else False
+    _all['family_pls'] = _all['in_vip_top'] & ('vip' in _enabled)
     _all['n_families'] = _all[['family_linear', 'family_tree', 'family_pls']].sum(axis=1)
+    for _c in _agg.columns:                     # family-aware consensus (all features)
+        _all[_c] = _agg[_c].values
     _all_path = os.path.join(out_dir, f'feature_rankings_{safe_name}.csv')
-    _all.sort_values(['n_methods', 'vip_rank'], ascending=[False, True]).to_csv(
+    _all.sort_values(['agg_worst_family_rank', 'agg_mean_family_rank', 'mz'],
+                     ascending=[True, True, True]).to_csv(
         _all_path, index=False, encoding='utf-8')
     print(f"  Saved full feature rankings (all {len(mz)} features) -> {_all_path}")
 
@@ -777,14 +837,14 @@ def feature_importance_analysis(X, y_labels, mz, safe_name, out_dir,
         X_filt_raw=X_filt_raw, groups=groups, normalization=normalization,
         scaling=scaling, compute_stability=compute_stability, n_boot=n_boot,
         compute_overlap_null=compute_overlap_null, n_overlap_perm=n_overlap_perm,
-        random_state=random_state,
+        random_state=random_state, guards=guards,
     )
 
-    if 'q_value_BH' in overlap_df.columns:
-        overlap_df = overlap_df.sort_values(['q_value_BH', 'n_methods'],
-                                            ascending=[True, False])
-    else:
-        overlap_df = overlap_df.sort_values('n_methods', ascending=False)
+    # Ordered by the family-aware consensus (worst family rank), then vote count.
+    # Deliberately NOT ordered by the colony-level screen statistics: with light
+    # aliased to plate they carry no evidence of a treatment effect.
+    overlap_df = overlap_df.sort_values(['agg_worst_family_rank', 'agg_mean_family_rank',
+                                         'n_methods'], ascending=[True, True, False])
     csv_path = os.path.join(out_dir, f'feature_overlap_{safe_name}.csv')
     overlap_df.to_csv(csv_path, index=False, encoding='utf-8')
     print(f"  Saved -> {csv_path}")
@@ -795,7 +855,8 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
                                y_labels, mz, top_n, log_transform,
                                univariate_test, X_filt_raw, groups,
                                normalization, scaling, compute_stability, n_boot,
-                               compute_overlap_null, n_overlap_perm, random_state):
+                               compute_overlap_null, n_overlap_perm, random_state,
+                               guards=None):
     """Add univariate FDR, bootstrap stability, and overlap-null columns to the
     candidate dataframe in place. Shared by both classifier_comparison modules."""
     from src.shared.feature_stats import (
@@ -833,16 +894,17 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
                                          aggregate_within_group=aggregate)
         overlap_df['fold_change']      = stats['fold_change'][overlap_list]
         overlap_df['log2_fold_change'] = stats['log2_fold_change'][overlap_list]
-        overlap_df['p_value']          = stats['p_value'][overlap_list]
-        overlap_df['q_value_BH']       = stats['q_value'][overlap_list]
+        overlap_df['screen_F']         = stats['statistic'][overlap_list]
+        overlap_df['screen_p']         = stats['p_value'][overlap_list]
+        overlap_df['screen_q']         = stats['q_value'][overlap_list]
         overlap_df['fc_top_group']     = stats['top_group'][overlap_list]
         overlap_df['fc_bottom_group']  = stats['bottom_group'][overlap_list]
-        overlap_df['univariate_test']  = stats['test_name']
+        overlap_df['screen_test']      = stats['test_name']
         n_sig = int((stats['q_value'][overlap_list] < 0.05).sum())
         units = stats.get('n_units_per_class', {})
         print(f"  Univariate {stats['test_name']} + BH-FDR: "
-              f"{n_sig}/{len(overlap_list)} candidates at q < 0.05 "
-              f"(descriptive condition-plate screen on colony means)"
+              f"{n_sig}/{len(overlap_list)} candidates at screen_q < 0.05 "
+              f"(descriptive condition-plate screen on colony means; not a test of light)"
               + (f"  (n units/class: {units})" if units else ""))
     else:
         print("  [stats] X_norm not provided -- skipping univariate FDR columns")
@@ -854,7 +916,7 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
             X_filt_raw, y_labels, groups, _preprocess, compute_vip_1comp,
             normalization=normalization, log_transform=log_transform,
             scaling=scaling, top_n=top_n, min_methods=2, n_boot=n_boot,
-            seed=random_state, use_methods=use_methods, n_jobs=n_jobs,
+            seed=random_state, use_methods=use_methods, n_jobs=n_jobs, guards=guards,
         )
         overlap_df['selection_frequency'] = freq[overlap_list]
         n_stable = int((freq[overlap_list] >= 0.8).sum())
@@ -871,7 +933,7 @@ def _attach_feature_statistics(overlap_df, overlap_list, counts, X, X_norm,
         null = overlap_permutation_null(
             X, y_labels, compute_vip_1comp, top_n=top_n,
             k_values=k_values, n_perm=n_overlap_perm, seed=random_state,
-            use_methods=use_methods, n_jobs=n_jobs, groups=groups,
+            use_methods=use_methods, n_jobs=n_jobs, groups=groups, guards=guards,
         )
         overlap_df['overlap_null_freq'] = null['per_feature_null_freq'][overlap_list]
         # NB: `counts` (observed votes) is computed by feature_importance_analysis

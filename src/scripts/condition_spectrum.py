@@ -1,8 +1,9 @@
 """
 condition_spectrum.py
 =====================
-Plots the mean MS spectrum per condition with high-confidence ensemble features
-highlighted as vertical tick marks.
+Plots the mean MS spectrum per condition with the cross-family-consensus features
+(config.CONSENSUS_RULE) highlighted in bold; the other candidates (top-N in >= 2
+methods) are drawn as thin coloured stems.
 
 Reads feature_overlap_<experiment>.csv and the raw binned intensity matrix from
 the results folder, then calls shared.visualization.plot_spectrum_with_features.
@@ -30,7 +31,6 @@ from scripts._common import experiment_and_folder, report_missing
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 PIPELINE      = 'standard'    # 'standard' or 'r_comparable'
-MIN_N_METHODS = config.HIGH_CONFIDENCE_N_METHODS   # set in config.py
 INTERACTIVE   = True         # True → Plotly HTML (notebook); False → Matplotlib PNG
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -83,6 +83,14 @@ def main():
                                      mz_min=config.MZ_MIN, mz_max=config.MZ_MAX)
 
     from shared.visualization import plot_spectrum_with_features
+    from shared.rank_aggregation import config_consensus_mask, config_consensus_label
+    try:
+        high_mask = config_consensus_mask(overlap_df, config)
+    except KeyError as e:
+        print(e.args[0])
+        return
+    print(f"{config_consensus_label(config)}: {int(high_mask.sum())} of "
+          f"{len(overlap_df)} candidate features")
 
     ext      = 'html' if INTERACTIVE else 'png'
     out_path = os.path.join(folder, f'condition_spectrum_{safe_name}.{ext}')
@@ -90,7 +98,7 @@ def main():
         X_binned, mz, y_labels, overlap_df,
         experiment_name=f'{experiment} ({PIPELINE})',
         out_path=out_path,
-        min_n_methods=MIN_N_METHODS,
+        high_mask=high_mask,
         interactive=INTERACTIVE,
     )
     print(f"Saved -> {out_path}")

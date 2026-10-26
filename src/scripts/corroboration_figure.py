@@ -3,15 +3,19 @@ corroboration_figure.py
 =======================
 Single PNG summarising which importance methods select which m/z features.
 
-  Top panel  -- UpSet plot of method intersections among ensemble features
-               (n_methods >= 2). Bars show the SIZE of each intersection;
+  Top panel  -- UpSet plot of method intersections among candidate features
+               (top-N in >= 2 methods, plus any cross-family-consensus feature).
+               Bars show the SIZE of each intersection;
                the dot matrix below shows WHICH methods are in each.
                Together this shows where the methods agree and which
                features each method selects that the others do not.
 
-  Bottom panel -- Top N most corroborated m/z, ranked by n_methods.
-                 Each row is one m/z. Bar length encodes n_methods
-                 (out of 6); bar colour encodes top_condition_mean
+  Bottom panel -- Top N m/z ranked by the family-aware consensus
+                 (agg_worst_family_rank, ascending; ties by agg_mean_family_rank).
+                 Each row is one m/z. Bar length encodes the descriptive vote
+                 count n_methods (out of 6); a bold black outline and "*" mark a
+                 "Cross-family consensus" feature (config.CONSENSUS_RULE); bar
+                 colour encodes top_condition_mean
                  (which group has the highest mean intensity for that
                  m/z); hatched bars flag ambiguous calls (low mean_margin).
                  Numeric annotation at the end of each bar reads "n/6".
@@ -45,6 +49,8 @@ sys.path.insert(0, _SRC)   # src/ packages take priority
 import config
 from shared.plot_style import apply_style, pub_savefig   # after the path setup
 from scripts._common import experiment_and_folder, report_missing
+from shared.rank_aggregation import (config_consensus_mask, config_consensus_label,
+                                     CONSENSUS_NAME)
 
 apply_style()
 
@@ -103,7 +109,7 @@ def _draw_upset(fig, gs, df, color='#2c3e50'):
     ax_bar.spines['top'].set_visible(False)
     ax_bar.spines['right'].set_visible(False)
     ax_bar.set_title(
-        'Method intersections -- corroborated features (n_methods >= 2)',
+        'Method intersections -- candidate features (top-N in \u2265 2 methods)',
         fontsize=11, loc='left'
     )
 
@@ -136,10 +142,9 @@ def _draw_upset(fig, gs, df, color='#2c3e50'):
 # -- Ranked m/z bar chart ------------------------------------------------------
 
 def _draw_ranked_bars(fig, gs, df, group_palette):
-    sort_cols = ['n_methods']
-    if 'vip_score' in df.columns:
-        sort_cols.append('vip_score')
-    top = df.sort_values(sort_cols, ascending=False).head(TOP_N_FEATURES).copy()
+    top = df.sort_values(['agg_worst_family_rank', 'agg_mean_family_rank', 'n_methods'],
+                         ascending=[True, True, False]).head(TOP_N_FEATURES).copy()
+    top['is_consensus'] = config_consensus_mask(top, config).values
     top = top.iloc[::-1].reset_index(drop=True)
 
     ax = fig.add_subplot(gs)
@@ -154,28 +159,33 @@ def _draw_ranked_bars(fig, gs, df, group_palette):
         color = group_palette.get(group, '#888888')
         hatch = '///' if ambig else None
         edge  = '#444444' if ambig else color
+        cons  = bool(row['is_consensus'])
 
-        ax.barh(i, n, color=color, edgecolor=edge,
+        ax.barh(i, n, color=color, edgecolor='black' if cons else edge,
+                linewidth=1.8 if cons else 1.0,
                 hatch=hatch, alpha=0.85 if not ambig else 0.6,
                 height=0.72)
-        ax.text(n + 0.08, i, f'{n}/{N_METHODS_TOTAL}',
+        ax.text(n + 0.08, i, f"{n}/{N_METHODS_TOTAL}{' *' if cons else ''}",
                 va='center', fontsize=8.5, color='#333333')
 
     ax.set_yticks(y)
     ax.set_yticklabels([f"{row['mz']:.3f}" for _, row in top.iterrows()],
                        fontsize=8.5, family='monospace')
     ax.set_xlim(0, N_METHODS_TOTAL + 0.7)
-    ax.set_xlabel('Methods agreeing  (n_methods)', fontsize=10)
+    ax.set_xlabel('Vote count  (n_methods; descriptive, not independent)', fontsize=10)
     ax.set_ylabel('m/z', fontsize=10)
     ax.set_xticks(range(0, N_METHODS_TOTAL + 1))
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.grid(True, axis='x', alpha=0.25, linestyle=':')
-    ax.set_title(f'Top {len(top)} m/z by ensemble corroboration',
+    ax.set_title(f'Top {len(top)} m/z by cross-family consensus rank '
+                 f'(* = {config_consensus_label(config)})',
                  fontsize=11, loc='left')
 
     handles = [mpatches.Patch(facecolor=color, edgecolor=color, label=g)
                for g, color in group_palette.items()]
+    handles.append(mpatches.Patch(facecolor='white', edgecolor='black', linewidth=1.8,
+                                  label=CONSENSUS_NAME))
     handles.append(mpatches.Patch(facecolor='white', edgecolor='#444444',
                                   hatch='///',
                                   label=f'Ambiguous (margin < {AMBIG_MARGIN}x)'))
@@ -191,14 +201,16 @@ def main():
         report_missing(OUTPUT_DIR, experiment, safe_name, 'corroboration_figure')
         return
 
-    needed  = METHOD_COLUMNS + ['mz', 'n_methods', 'mean_margin', 'top_condition_mean']
+    needed  = METHOD_COLUMNS + ['mz', 'n_methods', 'mean_margin', 'top_condition_mean',
+                                'agg_worst_family_rank', 'agg_mean_family_rank',
+                                'agg_n_families_topk']
     missing = [c for c in needed if c not in df.columns]
     if missing:
         print(f"CSV missing required columns: {missing}")
         print("Re-run run_analysis.py to regenerate the CSV with the new schema.")
         return
 
-    print(f"Loaded {len(df)} ensemble features from feature_overlap_{safe_name}.csv")
+    print(f"Loaded {len(df)} candidate features from feature_overlap_{safe_name}.csv")
 
     import seaborn as sns
     groups      = sorted(df['top_condition_mean'].dropna().unique().tolist())
@@ -211,7 +223,7 @@ def main():
     _draw_upset(fig, gs[0], df)
     _draw_ranked_bars(fig, gs[1], df, group_palette)
 
-    fig.suptitle(f'Method agreement on m/z features -- {experiment}',
+    fig.suptitle(f'Method agreement and cross-family consensus -- {experiment}',
                  fontsize=13, y=0.998)
 
     out_path = os.path.join(folder, f'corroboration_{safe_name}.png')
