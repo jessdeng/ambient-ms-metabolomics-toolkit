@@ -39,7 +39,8 @@ def _has_data_files(directory):
     return False
 
 
-def resolve_experiment_dir(base_dir, experiment, sample_name=SAMPLE_EXPERIMENT):
+def resolve_experiment_dir(base_dir, experiment, sample_name=SAMPLE_EXPERIMENT,
+                           allow_fallback=None):
     """Resolve which experiment directory to analyse, with a safe fallback.
 
     Resolution order:
@@ -65,6 +66,22 @@ def resolve_experiment_dir(base_dir, experiment, sample_name=SAMPLE_EXPERIMENT):
     if (experiment and experiment not in _PLACEHOLDERS
             and _has_data_files(configured)):
         return configured, experiment, False
+
+    if allow_fallback is None:
+        try:
+            import config as _cfg
+            allow_fallback = bool(getattr(_cfg, 'ALLOW_SAMPLE_FALLBACK', False))
+        except Exception:
+            allow_fallback = False
+    if not allow_fallback:
+        available = sorted(d for d in os.listdir(data_root)
+                           if os.path.isdir(os.path.join(data_root, d))) if os.path.isdir(data_root) else []
+        reason = ("is not set (placeholder value)" if (experiment or '') in _PLACEHOLDERS
+                  else f"points to {configured!r}, which contains no .csv/.txt spectra")
+        raise FileNotFoundError(
+            f"EXPERIMENT {reason}. Set EXPERIMENT in your configuration file to the name of "
+            f"your data folder under data/ (available: {available}). To run the bundled demo, "
+            f"set EXPERIMENT to '{sample_name}'.")
 
     sample_dir = os.path.join(data_root, sample_name)
     if _has_data_files(sample_dir):

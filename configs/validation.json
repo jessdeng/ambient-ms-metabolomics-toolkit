@@ -1,0 +1,27 @@
+{
+  "_comment": "Validated feature-selection workflow (python -m src.validated.run_feature_selection). Preprocessing identical to configs/manuscript_original.json.",
+  "MZ_MIN": 100,
+  "MZ_MAX": 2000,
+  "BIN_WIDTH": 0.5,
+  "NORMALIZATION": "tic",
+  "LOG_TRANSFORM": "log10",
+  "SCALING": "autoscale",
+  "VARIANCE_PERCENTILE": 25,
+  "ABUNDANCE_PERCENTILE": 5,
+  "PREVALENCE_THRESHOLD": 0.5,
+  "SNR_FLOOR_ENABLED": false,
+  "RANDOM_SEED": 42,
+  "METADATA_MANIFEST": "metadata_manifest.csv",
+  "PLS_MAX_COMPONENTS": 8,
+  "Q2_N_SPLITS": 3,
+  "Q2_N_REPEATS": 5,
+  "TOP_N": [
+    25,
+    50,
+    100
+  ],
+  "SPECTRAL_RESAMPLING": "native",
+  "FEATURE_LEVEL": "signal",
+  "SIGNAL_R_MIN": 0.9,
+  "_comment_features": "Primary feature level: native-grid 0.5-Da bins (all 0.1-Da sampled points summed per bin) merged into evidence-based signal groups (shared/feature_groups.py). Bin level and SPECTRAL_RESAMPLING='linspace5000' (original) are reported as sensitivity."
+}

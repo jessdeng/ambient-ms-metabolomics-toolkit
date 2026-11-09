@@ -228,34 +228,39 @@ N_CV_REPEATS = 10
 #   'auto'     — Welch's t-test (2 groups) / one-way ANOVA (>2 groups)
 #   'ttest'    — same parametric tests as 'auto'
 #   'wilcoxon' — Wilcoxon rank-sum (2 groups) / Kruskal-Wallis (>2 groups)
-# Benjamini-Hochberg FDR q-values are always reported next to the raw p-values.
+# The output columns are deliberately neutral (screen_F, screen_p, screen_q): each
+# condition was grown on one plate/enclosure, so condition and plate are aliased and
+# colony-level tests describe condition-plate separation, not a treatment effect.
+# Benjamini-Hochberg screen_q is reported for scale only; the candidate table is
+# never sorted by it.
 UNIVARIATE_TEST = 'auto'
 
 # Replicate handling for the univariate test. True (default) averages each feature
 # within its biological group (colony) BEFORE testing, so technical replicates are
 # not pseudoreplicated and n = colonies per class (consistent with the grouped CV).
 # Set False to test at the raw per-spectrum level (anti-conservative; for comparison
-# only). The chosen unit is recorded in the table's 'univariate_test' column.
+# only). The chosen unit is recorded in the table's 'screen_test' column.
 UNIVARIATE_GROUP_AGGREGATE = True
 
 # ── Feature-selection stability (bootstrap) ───────────────────────────────────────
-# Resamples colonies with replacement, re-fits the ensemble, and reports how
-# often each feature is selected — out-of-sample evidence the candidate list is
-# reproducible. Slower (re-fits the ensemble N_BOOTSTRAP times). Set False to skip.
-RUN_FEATURE_STABILITY = True
+# Subsamples colonies WITHOUT replacement within each class (2/3 of the colonies
+# per class, none duplicated), re-fits the ensemble, and reports how
+# often each feature is selected — a descriptive measure of sensitivity to colony
+# removal (subsamples overlap heavily and are not independent experiments). Slower (re-fits the ensemble N_BOOTSTRAP times). Set False to skip.
+RUN_FEATURE_STABILITY = False   # v2: optional (slow); enable in your config file
 N_BOOTSTRAP = 200
 
 # ── Overlap permutation null ──────────────────────────────────────────────────────
 # Permutes labels and recomputes the cross-method overlap to calibrate how many
 # features would corroborate by chance (the linear methods are collinear, so the
 # raw overlap overstates independence). Reports observed vs null + empirical p.
-RUN_OVERLAP_PERMUTATION = True
+RUN_OVERLAP_PERMUTATION = False   # v2: optional (slow); enable in your config file
 N_OVERLAP_PERMUTATIONS = 200
 
 # ── PLS-DA Q² validation ──────────────────────────────────────────────────────────
 # Cross-validated Q² for the descriptive PLS-DA plus a permuted-Q² null, so the
 # VIP-based prioritisation is reported with a calibrated model-quality metric.
-RUN_PLSDA_Q2 = True
+RUN_PLSDA_Q2 = False   # v2: optional (slow); enable in your config file
 N_Q2_PERMUTATIONS = 200
 
 # ── Parallelism ───────────────────────────────────────────────────────────────────
@@ -275,7 +280,7 @@ TOP_N_FEATURES = 50
 # CV folds (grouped by colony), a model-agnostic alternative to impurity-based
 # feature_importances_. Saved to permutation_importance_<exp>.csv and merged into
 # the candidate table by m/z. Set False to skip (saves a little time).
-RUN_PERMUTATION_IMPORTANCE = True
+RUN_PERMUTATION_IMPORTANCE = False   # v2: optional (slow); enable in your config file
 N_PERM_IMPORTANCE_REPEATS  = 5    # permutation repeats inside permutation_importance
 
 
@@ -312,16 +317,40 @@ VIP_FILTER_THRESHOLD = 1.0  # keep features with VIP > this value
 # Permutation test — shuffles class labels 100 times to verify that
 # classification accuracy is significantly above chance. The most rigorous
 # validation for small MS datasets. Slow — allow ~2-5 minutes.
-# p < 0.05 confirms the model is learning real signal, not memorising noise.
+# The result is an EXPLORATORY exceedance proportion, not a p-value: each condition
+# was grown on one plate/enclosure, so colonies are not exchangeable across plates
+# and a shuffled-label test cannot establish a treatment effect.
 RUN_PERMUTATION_TEST = True   # set False to skip (saves ~2–5 min)
 N_PERMUTATIONS = 100
 
-# ── Ensemble confidence threshold ────────────────────────────────────────────────
-# Features with n_methods >= this value are reported as "high confidence" by
-# condition_abundance.py and condition_spectrum.py.
-# The paper reports results for features corroborated by 4 or more methods.
-# Set to 2 to inspect all overlap features.
+# ── Cross-family consensus (headline filter) ─────────────────────────────────────
+# Ridge, LR and SVM are closely related linear solutions, so a raw vote count
+# (n_methods) lets one family cast three of six votes. Methods are therefore
+# averaged WITHIN family (linear / tree / PLS) and the consensus is read from
+# family-level ranks (see shared/rank_aggregation.py):
+#   'n_families_topk'   : agg_n_families_topk   >= CONSENSUS_MIN_FAMILIES_TOPK  (default)
+#                         (a feature is in the top-TOP_N_FEATURES of >= k families)
+#   'worst_family_rank' : agg_worst_family_rank <= CONSENSUS_MAX_WORST_FAMILY_RANK
+#                         (a feature must rank well in EVERY family; strictest)
+# Used by condition_abundance.py, condition_spectrum.py, vip_vs_nmethods.py,
+# corroboration_figure.py and the spectrum overview. Features meeting the rule
+# are always included in feature_overlap_<exp>.csv, even with < 2 method votes.
+CONSENSUS_RULE = 'n_families_topk'   # features top-ranked in >= CONSENSUS_MIN_FAMILIES_TOPK families
+CONSENSUS_MAX_WORST_FAMILY_RANK = 50
+CONSENSUS_MIN_FAMILIES_TOPK = 2
+
+# DEPRECATED: the old vote-count threshold. No longer used by the figure scripts;
+# kept so existing config files that set it still load.
 HIGH_CONFIDENCE_N_METHODS = 4
+
+# ── Small-sample capacity guards ──────────────────────────────────────────────────
+# Which count decides whether classifiers/importance fits get the small-sample
+# regularisation overrides (shared.classifier_comparison_standard.small_sample_guards):
+#   'per_class' : the smallest number of colonies in any class (the quantity that
+#                 limits grouped CV; default)
+#   'total'     : total colonies across all classes (legacy; effectively never
+#                 triggers in multi-class designs; use to reproduce Table 1)
+SMALL_SAMPLE_GUARD_KEY = 'per_class'
 
 
 # ── Quality-control metrics (chemometric QC) ─────────────────────────────────
@@ -374,15 +403,66 @@ SUPPLEMENTARY_SUBDIR = 'supplementary'
 # pipeline reads this to distinguish "user set this" from "config.py default",
 # so it can apply its own MetaboAnalyst-matching defaults when the user has not
 # explicitly overridden LOG_TRANSFORM, SCALING, or SNR_FLOOR_ENABLED.
+# -- Experimental-unit manifest ---------------------------------------------------
+# Optional CSV inside the experiment folder with columns file_path, class, colony
+# (+ optional plate, acquisition_order). When present it is the single source of
+# colony (CV group) identity; otherwise filename-topology grouping is used.
+METADATA_MANIFEST  = 'metadata_manifest.csv'   # used only if the file exists in the experiment folder
+EXPECTED_TECH_REPS = None   # e.g. 3 -> raise if a colony has a different count
+
+# -- Version 2 settings (see docs/CHANGES_v2.md) --------------------------------
+# Spectral grid: 'native' sums every instrument data point into the 0.5-Da bins
+# (recommended). 'linspace5000' is the original behaviour (spectra point-sampled
+# on a 5000-point grid; ~74% of 0.1-Da points unused) -- legacy reproduction only.
+SPECTRAL_RESAMPLING = 'native'
+# Unsupervised PCA (labels used only to describe the fitted structure).
+RUN_PCA = True
+N_PCA_COMPONENTS = 5
+# PLS-DA VIP: component-1 VIP (MetaboAnalyst 'Comp. 1' equivalent) is always
+# reported. The multi-component VIP uses A* latent variables, chosen as the argmax
+# of a leak-free, colony-grouped Q2 (StratifiedGroupKFold, refitted preprocessing).
+RUN_MULTICOMPONENT_VIP = True
+PLS_MAX_COMPONENTS = 8
+Q2_N_SPLITS = 3
+Q2_N_REPEATS = 5
+# A* = smallest number of LVs whose grouped Q2 is within this tolerance of the best
+# (parsimony; a raw argmax can sit on the search boundary). 0 restores the argmax.
+Q2_PARSIMONY_TOL = 0.05
+# Signal groups: adjacent 0.5-Da bins whose colony-mean profiles co-vary (r >=
+# SIGNAL_R_MIN) and whose raw profile shows one peak are annotated as one spectral
+# signal. Features remain 0.5-Da bins; the grouping is an annotation layer.
+RUN_SIGNAL_GROUPS = True
+SIGNAL_R_MIN = 0.9
+# Supplementary classification: leave-one-colony-out (pooled predictions).
+RUN_LOCO_CV = True
+# Exploratory colony-level permutation test (extras.py): classifier pre-specified.
+PERMUTATION_CLASSIFIER = 'Random Forest'
+# An invalid EXPERIMENT raises an error; set True only to restore the original
+# silent fallback to data/sample_experiment.
+ALLOW_SAMPLE_FALLBACK = False
+
 _json_keys: set = set()
-_config_json_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'config.json')
+# Settings file: the TOOLKIT_CONFIG environment variable (set by
+# `--config <file>` on the command line) or ./config.json in the repository root.
+_config_json_path = _os.environ.get('TOOLKIT_CONFIG') or _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)), 'config.json')
+CONFIG_FILE = _os.path.abspath(_config_json_path)
+UNKNOWN_CONFIG_KEYS = []
 if _os.path.exists(_config_json_path):
     with open(_config_json_path) as _f:
         _overrides = _json.load(_f)
     _g = globals()
     for _k, _v in _overrides.items():
-        if not _k.startswith('_') and _k in _g:
+        if _k.startswith('_'):
+            continue
+        if _k in _g:
             _g[_k] = _v
             _json_keys.add(_k)
-    del _g, _k, _v, _f, _overrides
+        else:
+            UNKNOWN_CONFIG_KEYS.append(_k)
+    if UNKNOWN_CONFIG_KEYS:
+        print(f"  [config] warning: unrecognised setting(s) ignored in {CONFIG_FILE}: {UNKNOWN_CONFIG_KEYS}")
+    del _g, _f, _overrides
+elif _os.environ.get('TOOLKIT_CONFIG'):
+    raise FileNotFoundError(f"Configuration file not found: {_config_json_path}")
 del _config_json_path, _os, _json

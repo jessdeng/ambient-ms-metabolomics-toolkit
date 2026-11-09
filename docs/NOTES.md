@@ -99,7 +99,8 @@ The output is saved as a CSV file with the following columns:
 | Column | What it means | How to use it |
 |--------|--------------|---------------|
 | `mz` | The m/z value of the feature | Use this to look up the feature in your data or a database |
-| `n_methods` | How many of the 6 methods ranked this feature in their top 50 | **Start here.** This is the most useful column for prioritisation. |
+| `n_methods` | How many of the 6 methods ranked this feature in their top 50 | Descriptive vote count. Ridge, LR and SVM are closely related, so the votes are not independent: prefer `agg_worst_family_rank` / `agg_n_families_topk` (cross-family consensus, one vote per family). |
+| `agg_worst_family_rank` | Worst rank of the feature across the linear, tree and PLS families (methods averaged within family) | **Start here.** Small = ranked well by every family. The figures mark `agg_n_families_topk >= 2` (top-50 in at least two families) as *Cross-family consensus*; `agg_worst_family_rank <= 50` is the stricter alternative (`CONSENSUS_RULE` in config.py). |
 
 **Per-method importance scores** — each on a different scale, do not compare across columns.
 
@@ -129,7 +130,7 @@ The output is saved as a CSV file with the following columns:
 
 **How to prioritise candidates:**
 
-1. Sort by `n_methods` descending — features appearing in 5 or 6 methods are your strongest candidates
+1. Sort by `agg_worst_family_rank` ascending — a feature ranked well by every family is your strongest candidate (`n_methods` is a secondary, descriptive count)
 2. Among features with the same `n_methods`, check whether `vip_score` is above 1.0
 3. Read `top_condition_mean` and `top_condition_ridge` to identify which group each feature is associated with
 4. If `mean_margin` is close to 1.0, the feature is high in multiple groups — flag it as ambiguous

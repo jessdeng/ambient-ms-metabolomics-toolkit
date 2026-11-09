@@ -38,14 +38,14 @@ def test_resolve_uses_configured_when_present(tmp_path):
 def test_resolve_falls_back_on_placeholder(tmp_path):
     base = str(tmp_path)
     _make_experiment(base, 'sample_experiment')
-    d, name, fallback = resolve_experiment_dir(base, 'your_experiment_folder')
+    d, name, fallback = resolve_experiment_dir(base, 'your_experiment_folder', allow_fallback=True)
     assert name == 'sample_experiment' and fallback is True
 
 
 def test_resolve_falls_back_on_missing_folder(tmp_path):
     base = str(tmp_path)
     _make_experiment(base, 'sample_experiment')
-    d, name, fallback = resolve_experiment_dir(base, 'does_not_exist')
+    d, name, fallback = resolve_experiment_dir(base, 'does_not_exist', allow_fallback=True)
     assert fallback is True and name == 'sample_experiment'
 
 
@@ -53,7 +53,7 @@ def test_resolve_falls_back_when_configured_folder_has_no_data(tmp_path):
     base = str(tmp_path)
     _make_experiment(base, 'empty_exp', with_data=False)
     _make_experiment(base, 'sample_experiment')
-    _d, name, fallback = resolve_experiment_dir(base, 'empty_exp')
+    _d, name, fallback = resolve_experiment_dir(base, 'empty_exp', allow_fallback=True)
     assert fallback is True and name == 'sample_experiment'
 
 
@@ -61,7 +61,7 @@ def test_resolve_raises_when_no_data_and_no_sample(tmp_path):
     base = str(tmp_path)
     os.makedirs(os.path.join(base, 'data'), exist_ok=True)
     with pytest.raises(FileNotFoundError):
-        resolve_experiment_dir(base, 'your_experiment_folder')
+        resolve_experiment_dir(base, 'your_experiment_folder', allow_fallback=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -107,3 +107,15 @@ def test_manifest_resolved_config_filters_to_uppercase_scalars(tmp_path):
     rc = manifest['resolved_config']
     assert rc['RANDOM_SEED'] == 42 and rc['EXPERIMENT'] == 'x'
     assert '_private' not in rc and 'lower' not in rc and 'OBJ' not in rc
+
+
+def test_resolve_raises_by_default_on_invalid_experiment(tmp_path):
+    """v2: an invalid EXPERIMENT must not silently analyse the demo data."""
+    import pytest
+    base = tmp_path
+    sample = base / 'data' / 'sample_experiment' / 'A' / 'c1'
+    sample.mkdir(parents=True)
+    (sample / 'x_T1.csv').write_text('100,1\n')
+    for bad in ('your_experiment_folder', 'does_not_exist'):
+        with pytest.raises(FileNotFoundError, match='EXPERIMENT'):
+            resolve_experiment_dir(str(base), bad, allow_fallback=False)

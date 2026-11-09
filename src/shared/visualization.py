@@ -23,6 +23,8 @@ _CB_PALETTE = [
 ]
 
 _GRAY_STEM   = '#BBBBBB'   # non-featured peak colour
+HIGH_LABEL   = 'Cross-family consensus'               # headline tier (family-aware rank rule)
+ENS_LABEL    = 'Candidate feature (top-N in \u2265 2 methods)'   # remaining candidates
 _STEM_TOP    = 105         # y-axis ceiling (% RA) — 5 % headroom above 100
 
 
@@ -30,8 +32,19 @@ _STEM_TOP    = 105         # y-axis ceiling (% RA) — 5 % headroom above 100
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _feature_tiers(overlap_df, min_n_methods):
-    """Return (feat_all, feat_high) as numpy arrays of m/z values."""
+def _feature_tiers(overlap_df, min_n_methods, high_mask=None):
+    """Return (feat_all, feat_high) as numpy arrays of m/z values.
+
+    ``high_mask`` (boolean array/Series aligned with ``overlap_df``) marks the
+    headline cross-family-consensus features; every row of ``overlap_df`` is drawn
+    as a candidate and the masked rows are drawn as the bold tier. Without it the
+    legacy rule is used (n_methods >= min_n_methods, top quartile as the bold tier).
+    """
+    if high_mask is not None:
+        high_mask = np.asarray(high_mask, dtype=bool)
+        if high_mask.shape[0] != len(overlap_df):
+            raise ValueError("high_mask must be aligned with overlap_df rows")
+        return overlap_df['mz'].values, overlap_df['mz'].values[high_mask]
     if 'n_methods' in overlap_df.columns:
         feat_df   = overlap_df[overlap_df['n_methods'] >= min_n_methods].copy()
         hi_thresh = max(int(np.percentile(feat_df['n_methods'], 75)),
@@ -159,7 +172,7 @@ def _select_labels(mz_vals, ra_vals, x_max=1200, min_gap_da=15, max_labels=15):
 
 def plot_spectrum_with_features(
     X_binned, mz, y_labels, overlap_df, experiment_name, out_path,
-    min_n_methods=1, interactive=False,
+    min_n_methods=1, interactive=False, high_mask=None,
 ):
     """
     Centroid-style mass spectrum — 5-panel small-multiples facet grid.
@@ -172,7 +185,9 @@ def plot_spectrum_with_features(
     overlap_df      : DataFrame with columns ['mz', 'n_methods']
     experiment_name : string for the figure title
     out_path        : output file path (.png for static, .html for interactive)
-    min_n_methods   : minimum n_methods threshold for ensemble features
+    min_n_methods   : legacy n_methods threshold (ignored when high_mask is given)
+    high_mask       : boolean array aligned with overlap_df rows marking the
+                      cross-family-consensus features (bold, labelled tier)
     interactive     : False → static Matplotlib PNG; True → Plotly HTML
 
     Design
@@ -184,11 +199,11 @@ def plot_spectrum_with_features(
     · 5-panel small-multiples grid, shared X and Y axes — panels are
       directly comparable without any manual rescaling.
     · In each panel, the focal group's non-featured bins appear as thin
-      silver-gray stems.  Ensemble and high-confidence features are drawn
+      silver-gray stems.  Candidate and cross-family-consensus features are drawn
       in the group's palette colour with a ● marker at the stem tip.
     · No ±1 SD clouds (SD fill does not translate to a centroid representation).
     """
-    feat_all, feat_high = _feature_tiers(overlap_df, min_n_methods)
+    feat_all, feat_high = _feature_tiers(overlap_df, min_n_methods, high_mask)
     groups              = sorted(np.unique(y_labels))
     avgs_ra             = _normalise_means(X_binned, y_labels, groups)
 
@@ -222,8 +237,8 @@ def _plot_matplotlib(mz, groups, avgs_ra,
     Stem tiers per panel
     --------------------
     Gray  (#BBBBBB, lw=0.5)   — non-featured peaks (background signal)
-    Color (lw=0.85, α=0.62)   — ensemble-only features (colored stem, no label)
-    Color (lw=1.4,  α=0.95)   — high-confidence features (bold stem +
+    Color (lw=0.85, α=0.62)   — candidate-only features (colored stem, no label)
+    Color (lw=1.4,  α=0.95)   — cross-family-consensus features (bold stem +
                                  rotated m/z text label above peak apex)
 
     X-axis
@@ -264,14 +279,14 @@ def _plot_matplotlib(mz, groups, avgs_ra,
             colors=_GRAY_STEM, linewidths=0.5, zorder=2,
         )
 
-        # ── Ensemble-only features: colored stem (no label) ───────────────
+        # ── Candidate-only features: colored stem (no label) ───────────────
         if len(ens_idx):
             ax.vlines(
                 mz[ens_idx], 0, ra[ens_idx],
                 colors=color, linewidths=0.85, alpha=0.62, zorder=3,
             )
 
-        # ── High-confidence features: bold stem + m/z text label ──────────
+        # ── Cross-family consensus features: bold stem + m/z text label ──────────
         if len(hi_idx):
             mz_h = mz[hi_idx]
             ra_h = ra[hi_idx]
@@ -333,9 +348,9 @@ def _plot_matplotlib(mz, groups, avgs_ra,
         Line2D([0], [0], color=_GRAY_STEM, lw=1.0,
                label='Non-featured peak (group mean)'),
         Line2D([0], [0], color='#555555', lw=0.9, alpha=0.65,
-               label='Ensemble feature'),
+               label=ENS_LABEL),
         Line2D([0], [0], color='#333333', lw=1.4, alpha=0.95,
-               label='High-confidence feature  (label = m/z, 1 d.p.)'),
+               label=f'{HIGH_LABEL}  (label = m/z, 1 d.p.)'),
     ]
     fig.legend(
         handles=legend_handles,
@@ -365,8 +380,8 @@ def _plot_plotly(mz, groups, avgs_ra,
 
     Each panel contains:
       · Gray stems for non-featured bins
-      · Group-colored stems (medium) for ensemble-only features
-      · Group-colored stems (bold) for high-confidence features,
+      · Group-colored stems (medium) for candidate-only features
+      · Group-colored stems (bold) for cross-family-consensus features,
         with m/z text labels (1 d.p.) above each labeled peak.
         Labels use the same _select_labels() greedy filter as the
         Matplotlib backend to prevent crowding.
@@ -413,7 +428,7 @@ def _plot_plotly(mz, groups, avgs_ra,
             name='Non-featured peak',
         ), row=row, col=1)
 
-        # ── Ensemble-only: colored stems (invisible hover markers at tips) ─
+        # ── Candidate-only: colored stems (invisible hover markers at tips) ─
         if len(ens_idx):
             mz_e, ra_e = mz[ens_idx], ra[ens_idx]
             xs_e, ys_e = _plotly_stems(mz_e, ra_e)
@@ -424,7 +439,7 @@ def _plot_plotly(mz, groups, avgs_ra,
                 hoverinfo='skip',
                 showlegend=(i == 0),
                 legendgroup='ensemble',
-                name='Ensemble feature',
+                name=ENS_LABEL,
             ), row=row, col=1)
             fig.add_trace(go.Scatter(
                 x=mz_e.tolist(), y=ra_e.tolist(),
@@ -432,13 +447,13 @@ def _plot_plotly(mz, groups, avgs_ra,
                 marker=dict(size=6, color='rgba(0,0,0,0)'),
                 showlegend=False,
                 hovertemplate=(
-                    f'<b>Ensemble — {group}</b><br>'
+                    f'<b>Candidate — {group}</b><br>'
                     'm/z: %{x:.4f}<br>'
                     'RA: %{y:.1f} %<extra></extra>'
                 ),
             ), row=row, col=1)
 
-        # ── High-confidence: bold stems + m/z text labels ─────────────────
+        # ── Cross-family consensus: bold stems + m/z text labels ─────────────────
         if len(hi_idx):
             mz_h, ra_h = mz[hi_idx], ra[hi_idx]
             xs_h, ys_h = _plotly_stems(mz_h, ra_h)
@@ -449,7 +464,7 @@ def _plot_plotly(mz, groups, avgs_ra,
                 hoverinfo='skip',
                 showlegend=(i == 0),
                 legendgroup='highconf',
-                name='High-confidence feature',
+                name=HIGH_LABEL,
             ), row=row, col=1)
             # Invisible hover-only markers at stem tips (no visible symbol)
             fig.add_trace(go.Scatter(
@@ -458,7 +473,7 @@ def _plot_plotly(mz, groups, avgs_ra,
                 marker=dict(size=8, color='rgba(0,0,0,0)'),
                 showlegend=False,
                 hovertemplate=(
-                    f'<b>High-confidence — {group}</b><br>'
+                    f'<b>{HIGH_LABEL} — {group}</b><br>'
                     'm/z: %{{x:.4f}}<br>'
                     'RA: %{{y:.1f}} %<extra></extra>'
                 ),
@@ -524,8 +539,8 @@ def _plot_plotly(mz, groups, avgs_ra,
             text=(
                 'Stem height = group mean  |  '
                 'Gray = non-featured  |  '
-                'Thin colored = ensemble feature  |  '
-                'Bold colored + label = high-confidence (m/z, 1 d.p.)  |  '
+                'Thin colored = candidate feature (\u2265 2 methods)  |  '
+                'Bold colored + label = cross-family consensus (m/z, 1 d.p.)  |  '
                 'Y-axis normalised to dataset maximum'
             ),
             xref='paper', yref='paper', x=0.5, y=-0.04,

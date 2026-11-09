@@ -101,10 +101,11 @@ def _load_and_preprocess(experiment_name):
                                           percentile=config.ABUNDANCE_PERCENTILE)
 
     X_filt_raw = X_filt.copy()
-    X_norm = preprocess(X_filt.copy(), normalization=config.NORMALIZATION,
-                        log_transform=_LOG_TRANSFORM, scaling='none')
-    X = preprocess(X_filt, normalization=config.NORMALIZATION,
-                   log_transform=_LOG_TRANSFORM, scaling=_SCALING)
+    _stages = preprocess(X_filt, normalization=config.NORMALIZATION,
+                         log_transform=_LOG_TRANSFORM, scaling=_SCALING,
+                         return_stages=True)
+    X = _stages['scaled']
+    X_norm = _stages['transformed']   # uncentred (scaling='none' would mean-centre)
 
     return X_binned, X, X_norm, y_labels, sample_names, mz, X_filt_raw
 

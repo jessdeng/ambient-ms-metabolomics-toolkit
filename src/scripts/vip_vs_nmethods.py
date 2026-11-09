@@ -1,12 +1,14 @@
 """
 vip_vs_nmethods.py
 ==================
-Plots ensemble confidence (n_methods) vs PLS-DA VIP score for all
+Plots the ensemble vote count (n_methods) vs component-1 PLS-DA VIP score for all
 feature overlap candidates across experiments.
 
-Highlights features that are high-confidence by ensemble voting but
-below the conventional VIP > 1.0 threshold — i.e. features the
-ensemble catches that PLS-DA alone would miss.
+The vote count is descriptive only (Ridge, LR and SVM are closely related, so
+votes are not independent). Features meeting the family-aware "Cross-family
+consensus" rule (config.CONSENSUS_RULE) are ringed and labelled with their m/z;
+those below the conventional VIP > 1.0 threshold are the ones the consensus
+catches that component-1 PLS-DA alone would miss.
 
 Usage (from repo root):
     python -m src.scripts.vip_vs_nmethods
@@ -26,9 +28,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
 
-from src.shared.plot_style import apply_style, pub_savefig
 
-apply_style()
 
 # Add repo root to path
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,13 +36,16 @@ _SRC  = os.path.dirname(_HERE)
 _ROOT = os.path.dirname(_SRC)
 sys.path.insert(0, _ROOT)  # config.py lives here
 sys.path.insert(0, _SRC)   # src/ packages take priority
+from shared.plot_style import apply_style, pub_savefig   # after the path setup
+apply_style()
 import config
+from shared.rank_aggregation import (config_consensus_mask, config_consensus_label,
+                                     CONSENSUS_NAME)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Change to 'r_comparable' if you ran the R-comparable pipeline
 PIPELINE    = 'standard'
 OUTPUT_DIR  = os.path.join(_ROOT, 'results', PIPELINE)
-MIN_N_LABEL = config.HIGH_CONFIDENCE_N_METHODS   # set in config.py
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -50,7 +53,16 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Find all feature overlap CSVs in the output folder
-    csv_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, 'feature_overlap_*.csv')))
+    # v2: outputs live in results/<pipeline>/<experiment>/; the flat layout is still read.
+    csv_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, '*', 'feature_overlap_*.csv'))
+                       + glob.glob(os.path.join(OUTPUT_DIR, 'feature_overlap_*.csv')))
+    wanted = [a for a in sys.argv[1:] if not a.startswith('-')]
+    if wanted:   # optional: experiment names to plot, in this order
+        by_name = {os.path.basename(f)[len('feature_overlap_'):-4]: f for f in csv_files}
+        missing = [w for w in wanted if w not in by_name]
+        if missing:
+            raise SystemExit(f"No feature_overlap csv for {missing} under {OUTPUT_DIR}")
+        csv_files = [by_name[w] for w in wanted]
 
     if not csv_files:
         print(f"No feature_overlap_*.csv files found in {OUTPUT_DIR}")
@@ -69,14 +81,16 @@ def main():
 
     palette = sns.color_palette('colorblind', n_colors=n)
     fig, axes = plt.subplots(nrows, ncols, figsize=(11, 4.5 * nrows), dpi=300)
-    axes = axes.flatten() if n > 1 else [axes]
+    axes = np.atleast_1d(axes).flatten()    # also valid for a single experiment (1 x 2 grid)
 
     for ax, (name, fpath), color in zip(axes, experiments.items(), palette):
         df = pd.read_csv(fpath)
 
         rng    = np.random.default_rng(42)
         jitter = rng.uniform(-0.12, 0.12, size=len(df))
-        sizes  = df['n_methods'].map({2: 40, 3: 80, 4: 140, 5: 220})
+        # n = 6 (all six rankings) was previously unmapped -> NaN size -> point dropped.
+        # consensus-only candidates can have 0-1 votes: give them the smallest marker
+        sizes  = df['n_methods'].map({1: 20, 2: 40, 3: 80, 4: 140, 5: 220, 6: 320}).fillna(10)
 
         ax.scatter(
             df['n_methods'] + jitter,
@@ -88,30 +102,32 @@ def main():
         ax.axhline(1.0, color='#888888', linestyle='--',
                    linewidth=0.9, alpha=0.7, zorder=1)
 
-        # Label high-confidence features
-        for _, row in df[df['n_methods'] >= MIN_N_LABEL].iterrows():
+        # Ring + label the cross-family-consensus features
+        cons = config_consensus_mask(df, config)
+        ax.scatter(
+            (df['n_methods'] + jitter)[cons], df['vip_score'][cons],
+            s=sizes[cons] + 60, facecolors='none', edgecolors='black',
+            linewidths=1.2, zorder=3
+        )
+        for (_, row), j in zip(df[cons].iterrows(), jitter[cons.values]):
             ax.annotate(
                 f"{row['mz']:.1f}",
-                xy=(row['n_methods'], row['vip_score']),
+                xy=(row['n_methods'] + j, row['vip_score']),
                 xytext=(6, 3), textcoords='offset points',
                 fontsize=7, color='#333333', fontweight='bold'
             )
 
         ax.set_title(name, fontsize=10, fontweight='bold', color='#1a1a1a')
-        ax.set_xlabel('Ensemble count (number of methods)', fontsize=8)
-        ax.set_ylabel('PLS-DA VIP score', fontsize=8)
-        ax.set_xticks([2, 3, 4, 5])
+        ax.set_xlabel('Vote count (not independent)', fontsize=8)
+        ax.set_ylabel('Component-1 VIP', fontsize=8)
+        ax.set_xticks(range(int(df['n_methods'].min()), 7))
         ax.tick_params(labelsize=8)
-        ax.set_xlim(1.5, 5.8)
+        ax.set_xlim(df['n_methods'].min() - 0.5, 6.5)
 
-    # Shading and n counts (after ylim is set)
+    # n counts (after ylim is set)
     for ax, (name, fpath) in zip(axes, experiments.items()):
         df   = pd.read_csv(fpath)
-        ymax = ax.get_ylim()[1]
-        ax.axvspan(3.5, 5.8, ymin=0,
-                   ymax=1.0 / ymax if ymax > 1.0 else 1.0,
-                   color='#FDEBD0', alpha=0.35, zorder=0)
-        for n_m in [2, 3, 4, 5]:
+        for n_m in [0, 1, 2, 3, 4, 5, 6]:
             count = len(df[df['n_methods'] == n_m])
             if count > 0:
                 ax.text(n_m, ax.get_ylim()[0] + 0.02, f'n={count}',
@@ -127,17 +143,19 @@ def main():
         plt.scatter([], [], s=80,  color='grey', alpha=0.6, label='n = 3 methods'),
         plt.scatter([], [], s=140, color='grey', alpha=0.6, label='n = 4 methods'),
         plt.scatter([], [], s=220, color='grey', alpha=0.6, label='n = 5 methods'),
-        mpatches.Patch(color='#FDEBD0', alpha=0.5, label='High confidence, VIP < 1.0'),
+        plt.scatter([], [], s=320, color='grey', alpha=0.6, label='n = 6 methods'),
+        plt.scatter([], [], s=140, facecolors='none', edgecolors='black', linewidths=1.2,
+                    label=config_consensus_label(config)),
         plt.Line2D([0], [0], color='#888888', linestyle='--',
                    linewidth=0.9, label='VIP = 1.0 threshold'),
     ]
     fig.legend(handles=legend_handles, loc='lower center', ncol=3,
-               fontsize=8, framealpha=0.9, bbox_to_anchor=(0.5, -0.04))
+               fontsize=8, framealpha=0.9, bbox_to_anchor=(0.5, 0.0))
 
-    fig.suptitle('Ensemble confidence vs. PLS-DA VIP score',
+    fig.suptitle(f'Vote count vs. component-1 PLS-DA VIP ({CONSENSUS_NAME} ringed)',
                  fontsize=12, fontweight='bold', y=1.01)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.12, 1, 1])      # leave room for the legend below the axes
     out_path = os.path.join(OUTPUT_DIR, 'vip_vs_nmethods.png')
     pub_savefig(out_path)
 
