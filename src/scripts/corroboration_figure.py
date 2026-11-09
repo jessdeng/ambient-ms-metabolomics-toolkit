@@ -1,233 +1,76 @@
 """
-corroboration_figure.py
-=======================
-Single PNG summarising which importance methods select which m/z features.
+corroboration_figure.py — where the rankers agree and where they diverge.
 
-  Top panel  -- UpSet plot of method intersections among candidate features
-               (top-N in >= 2 methods, plus any cross-family-consensus feature).
-               Bars show the SIZE of each intersection;
-               the dot matrix below shows WHICH methods are in each.
-               Together this shows where the methods agree and which
-               features each method selects that the others do not.
+Left: top-N agreement (Jaccard) between every pair of rankers, with the value
+expected by chance. Right: univariate-F rank against component-1 VIP rank for
+every bin (log axes); candidates are coloured, filled if consistent across
+colonies.
 
-  Bottom panel -- Top N m/z ranked by the family-aware consensus
-                 (agg_worst_family_rank, ascending; ties by agg_mean_family_rank).
-                 Each row is one m/z. Bar length encodes the descriptive vote
-                 count n_methods (out of 6); a bold black outline and "*" mark a
-                 "Cross-family consensus" feature (config.CONSENSUS_RULE); bar
-                 colour encodes top_condition_mean
-                 (which group has the highest mean intensity for that
-                 m/z); hatched bars flag ambiguous calls (low mean_margin).
-                 Numeric annotation at the end of each bar reads "n/6".
-
-Reads from feature_overlap_<experiment>.csv. Requires the per-method
-membership columns (in_rf_top, in_svm_top, ...) and the per-group
-attribution columns (top_condition_mean, mean_margin, ...).
-
-Usage (from the repository folder; run run_analysis.py first):
-    python src/scripts/corroboration_figure.py            # EXPERIMENT from config.json
-    python src/scripts/corroboration_figure.py my_experiment   # or name the experiment
-The figure is saved next to the results, e.g. results/standard/my_experiment/.
-
-Configure PIPELINE and the thresholds below.
+    python src/scripts/corroboration_figure.py [experiment]
 """
-
 import os
 import sys
+
+_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path[:0] = [os.path.dirname(_SRC), _SRC]
+
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_SRC  = os.path.dirname(_HERE)
-_ROOT = os.path.dirname(_SRC)
-sys.path.insert(0, _ROOT)  # config.py lives here
-sys.path.insert(0, _SRC)   # src/ packages take priority
 import config
-from shared.plot_style import apply_style, pub_savefig   # after the path setup
-from scripts._common import experiment_and_folder, report_missing
-from shared.rank_aggregation import (config_consensus_mask, config_consensus_label,
-                                     CONSENSUS_NAME)
+from shared.plot_style import apply_style, pub_savefig
+from scripts._common import experiment_and_folder
 
 apply_style()
+NAMES = {'univariate': 'Univariate F', 'vip': 'VIP (comp. 1)', 'ridge': 'Ridge', 'rf': 'Random forest'}
 
-# -- Configuration -------------------------------------------------------------
-PIPELINE          = 'standard'   # 'standard' or 'r_comparable'
-TOP_N_FEATURES    = 30           # how many m/z to list in the bottom panel
-AMBIG_MARGIN      = 1.5          # mean_margin below this -> hatched bar
-MAX_INTERSECTIONS = 20           # cap on UpSet rows
-# ------------------------------------------------------------------------------
-
-BASE_DIR   = _ROOT
-OUTPUT_DIR = os.path.join(BASE_DIR, 'results', PIPELINE)
-
-METHOD_NAMES    = ['rf', 'svm', 'gb', 'lr', 'ridge', 'vip']
-METHOD_LABELS   = ['RF', 'SVM', 'GB', 'LR', 'Ridge', 'VIP']
-METHOD_COLUMNS  = [f'in_{m}_top' for m in METHOD_NAMES]
-N_METHODS_TOTAL = len(METHOD_NAMES)
-
-
-def _load_overlap():
-    experiment, safe_name, folder = experiment_and_folder(OUTPUT_DIR, config)
-    if folder is None:
-        return None, experiment, safe_name, None
-    path = os.path.join(folder, f'feature_overlap_{safe_name}.csv')
-    return pd.read_csv(path), experiment, safe_name, folder
-
-
-# -- UpSet panel ---------------------------------------------------------------
-
-def _intersection_signature(row):
-    return tuple(METHOD_NAMES[i] for i, c in enumerate(METHOD_COLUMNS) if row[c])
-
-
-def _draw_upset(fig, gs, df, color='#2c3e50'):
-    sigs   = df.apply(_intersection_signature, axis=1)
-    counts = sigs.value_counts().head(MAX_INTERSECTIONS)
-    intersections = list(counts.index)
-    sizes    = counts.values
-    n_inter  = len(intersections)
-
-    inner = gs.subgridspec(
-        nrows=2, ncols=1,
-        height_ratios=[2.0, 1.6],
-        hspace=0.05,
-    )
-
-    ax_bar = fig.add_subplot(inner[0, 0])
-    x = np.arange(n_inter)
-    ax_bar.bar(x, sizes, color=color, width=0.7)
-    for xi, s in zip(x, sizes):
-        ax_bar.text(xi, s, str(s), ha='center', va='bottom', fontsize=8)
-    ax_bar.set_ylabel('Features in\nintersection', fontsize=9)
-    ax_bar.set_xticks([])
-    ax_bar.set_xlim(-0.5, n_inter - 0.5)
-    ax_bar.set_ylim(0, max(sizes) * 1.18)
-    ax_bar.spines['top'].set_visible(False)
-    ax_bar.spines['right'].set_visible(False)
-    ax_bar.set_title(
-        'Method intersections -- candidate features (top-N in \u2265 2 methods)',
-        fontsize=11, loc='left'
-    )
-
-    ax_dot = fig.add_subplot(inner[1, 0], sharex=ax_bar)
-    for col_i, sig in enumerate(intersections):
-        active_y = []
-        for row_i, m in enumerate(METHOD_NAMES):
-            in_set = m in sig
-            y_pos  = N_METHODS_TOTAL - 1 - row_i
-            ax_dot.scatter(col_i, y_pos, s=70,
-                           color=color if in_set else '#dddddd',
-                           zorder=2)
-            if in_set:
-                active_y.append(y_pos)
-        if len(active_y) >= 2:
-            ax_dot.plot([col_i] * len(active_y), active_y,
-                        color=color, linewidth=1.5, zorder=1)
-
-    ax_dot.set_xlim(-0.5, n_inter - 0.5)
-    ax_dot.set_ylim(-0.5, N_METHODS_TOTAL - 0.5)
-    ax_dot.set_yticks(range(N_METHODS_TOTAL))
-    ax_dot.set_yticklabels(METHOD_LABELS[::-1], fontsize=9)
-    ax_dot.set_xticks([])
-    for spine in ('top', 'right', 'bottom'):
-        ax_dot.spines[spine].set_visible(False)
-    ax_dot.spines['left'].set_visible(False)
-    ax_dot.tick_params(left=False)
-
-
-# -- Ranked m/z bar chart ------------------------------------------------------
-
-def _draw_ranked_bars(fig, gs, df, group_palette):
-    top = df.sort_values(['agg_worst_family_rank', 'agg_mean_family_rank', 'n_methods'],
-                         ascending=[True, True, False]).head(TOP_N_FEATURES).copy()
-    top['is_consensus'] = config_consensus_mask(top, config).values
-    top = top.iloc[::-1].reset_index(drop=True)
-
-    ax = fig.add_subplot(gs)
-    y  = np.arange(len(top))
-
-    for i, row in top.iterrows():
-        n      = int(row['n_methods'])
-        group  = row['top_condition_mean']
-        margin = row['mean_margin']
-        ambig  = pd.isna(margin) or margin < AMBIG_MARGIN
-
-        color = group_palette.get(group, '#888888')
-        hatch = '///' if ambig else None
-        edge  = '#444444' if ambig else color
-        cons  = bool(row['is_consensus'])
-
-        ax.barh(i, n, color=color, edgecolor='black' if cons else edge,
-                linewidth=1.8 if cons else 1.0,
-                hatch=hatch, alpha=0.85 if not ambig else 0.6,
-                height=0.72)
-        ax.text(n + 0.08, i, f"{n}/{N_METHODS_TOTAL}{' *' if cons else ''}",
-                va='center', fontsize=8.5, color='#333333')
-
-    ax.set_yticks(y)
-    ax.set_yticklabels([f"{row['mz']:.3f}" for _, row in top.iterrows()],
-                       fontsize=8.5, family='monospace')
-    ax.set_xlim(0, N_METHODS_TOTAL + 0.7)
-    ax.set_xlabel('Vote count  (n_methods; descriptive, not independent)', fontsize=10)
-    ax.set_ylabel('m/z', fontsize=10)
-    ax.set_xticks(range(0, N_METHODS_TOTAL + 1))
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.grid(True, axis='x', alpha=0.25, linestyle=':')
-    ax.set_title(f'Top {len(top)} m/z by cross-family consensus rank '
-                 f'(* = {config_consensus_label(config)})',
-                 fontsize=11, loc='left')
-
-    handles = [mpatches.Patch(facecolor=color, edgecolor=color, label=g)
-               for g, color in group_palette.items()]
-    handles.append(mpatches.Patch(facecolor='white', edgecolor='black', linewidth=1.8,
-                                  label=CONSENSUS_NAME))
-    handles.append(mpatches.Patch(facecolor='white', edgecolor='#444444',
-                                  hatch='///',
-                                  label=f'Ambiguous (margin < {AMBIG_MARGIN}x)'))
-    ax.legend(handles=handles, loc='lower right', fontsize=8,
-              framealpha=0.9, title='Top condition', title_fontsize=8.5)
-
-
-# -- Main ----------------------------------------------------------------------
 
 def main():
-    df, experiment, safe_name, folder = _load_overlap()
-    if df is None:
-        report_missing(OUTPUT_DIR, experiment, safe_name, 'corroboration_figure')
+    experiment, safe, folder = experiment_and_folder(config, prefix='feature_rankings')
+    if folder is None:
         return
+    conc = pd.read_csv(os.path.join(folder, f'ranker_concordance_{safe}.csv'))
+    ranks = pd.read_csv(os.path.join(folder, f'feature_rankings_{safe}.csv'))
+    names = list(dict.fromkeys(list(conc.ranker_a) + list(conc.ranker_b)))
+    J = pd.DataFrame(np.eye(len(names)), index=names, columns=names)
+    for r in conc.itertuples():
+        J.loc[r.ranker_a, r.ranker_b] = J.loc[r.ranker_b, r.ranker_a] = r.jaccard
 
-    needed  = METHOD_COLUMNS + ['mz', 'n_methods', 'mean_margin', 'top_condition_mean',
-                                'agg_worst_family_rank', 'agg_mean_family_rank',
-                                'agg_n_families_topk']
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        print(f"CSV missing required columns: {missing}")
-        print("Re-run run_analysis.py to regenerate the CSV with the new schema.")
-        return
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.6), dpi=300,
+                                 gridspec_kw={'width_ratios': [1, 1.25]})
+    im = a1.imshow(J.to_numpy(), cmap='Greys', vmin=0, vmax=1)
+    for i in range(len(names)):
+        for j in range(len(names)):
+            if i != j:
+                a1.text(j, i, f'{J.iat[i, j]:.2f}', ha='center', va='center', fontsize=9,
+                        color='white' if J.iat[i, j] > 0.5 else 'black')
+    a1.set_xticks(range(len(names))); a1.set_yticks(range(len(names)))
+    a1.set_xticklabels([NAMES.get(n, n) for n in names], rotation=30, ha='right', fontsize=8)
+    a1.set_yticklabels([NAMES.get(n, n) for n in names], fontsize=8)
+    a1.set_title(f'Top-{config.TOP_N_FEATURES} agreement (Jaccard)\nchance = {conc.chance.iloc[0]:.3f}',
+                 fontsize=10, loc='left')
+    fig.colorbar(im, ax=a1, shrink=0.7)
 
-    print(f"Loaded {len(df)} candidate features from feature_overlap_{safe_name}.csv")
-
-    import seaborn as sns
-    groups      = sorted(df['top_condition_mean'].dropna().unique().tolist())
-    palette_rgb = sns.color_palette('colorblind', n_colors=len(groups))
-    group_palette = {g: palette_rgb[i] for i, g in enumerate(groups)}
-
-    fig = plt.figure(figsize=(12, 12), dpi=300)
-    gs  = fig.add_gridspec(2, 1, height_ratios=[1, 1.4], hspace=0.18)
-
-    _draw_upset(fig, gs[0], df)
-    _draw_ranked_bars(fig, gs[1], df, group_palette)
-
-    fig.suptitle(f'Method agreement and cross-family consensus -- {experiment}',
-                 fontsize=13, y=0.998)
-
-    out_path = os.path.join(folder, f'corroboration_{safe_name}.png')
-    pub_savefig(out_path)
+    rest = ranks[~ranks.candidate]
+    a2.scatter(rest.univariate_rank, rest.vip_rank, s=4, color='0.75', edgecolor='none',
+               label='other bins')
+    cand = ranks[ranks.candidate]
+    for consistent, face in ((True, '#0072B2'), (False, 'white')):
+        c = cand[cand.colonies_consistent == consistent]
+        a2.scatter(c.univariate_rank, c.vip_rank, s=26, facecolor=face, edgecolor='#0072B2', lw=0.8,
+                   label=f"candidate, {'consistent' if consistent else 'not consistent'} across colonies")
+    n = config.TOP_N_FEATURES
+    a2.axvline(n + 0.5, color='0.4', ls=':', lw=0.8); a2.axhline(n + 0.5, color='0.4', ls=':', lw=0.8)
+    a2.set_xscale('log'); a2.set_yscale('log')
+    a2.set_xlabel('Univariate F rank (colony means)'); a2.set_ylabel('Component-1 VIP rank')
+    a2.legend(fontsize=7, frameon=False, loc='lower right')
+    a2.set_title('Rank against rank (dotted: top-N cut-offs)', fontsize=10, loc='left')
+    fig.suptitle(f'Ranker agreement -- {experiment}', fontsize=12)
+    fig.tight_layout()
+    pub_savefig(os.path.join(folder, f'corroboration_{safe}.png'))
 
 
 if __name__ == '__main__':

@@ -1,9 +1,9 @@
-"""Multi-experiment PCA overview from standard-run outputs (manuscript Figure 2).
+"""Multi-experiment PCA overview (manuscript Figure 2).
 
     python src/scripts/pca_overview.py experiment_a experiment_b experiment_c experiment_d
 
-Reads results/standard/<exp>/pca_scores_<exp>.csv and pca_explained_variance_<exp>.csv
-and writes results/standard/pca_overview.png. Spectra are small points, colony means
+Reads results/<exp>/pca_scores_<exp>.csv and pca_explained_variance_<exp>.csv
+and writes results/pca_overview.png. Spectra are small points, colony means
 large points; labels are used only to colour the (unsupervised) scores.
 """
 import os, sys
@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUT = os.path.join(ROOT, 'results', 'standard')
+OUT = os.path.join(ROOT, 'results')
 
 
 def main(exps):

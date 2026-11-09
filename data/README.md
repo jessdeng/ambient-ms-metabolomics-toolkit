@@ -18,7 +18,7 @@ data/
         └── ...
 ```
 
-- Each **subfolder** = one biological group (condition/isolate/treatment)
+- Each **subfolder** = one condition (treatment)
 - Each **file** = one sample (one MS acquisition)
 - Supported formats: `.csv` (comma-separated) or `.txt` (tab-separated)
 
@@ -31,21 +31,18 @@ Each sample file must contain at least these two columns (names are case-insensi
 | m/z | `mz`, `Mass/Charge`, `m/z` | Feature mass-to-charge ratio |
 | Intensity | `int`, `Intensity`, `intensity` | Feature intensity |
 
-## Filename Convention for GroupKFold CV
+## Colonies and technical replicates
 
-For the pseudoreplication-corrected cross-validation to work correctly, filenames should encode the **biological replicate** (colony/well) and **technical replicate** number using the pattern:
+The colony (biological replicate) is the experimental unit; its technical replicates are averaged before any ranking. The colony of each file is read from `metadata_manifest.csv` in the experiment folder if present (columns `file_path`, `class`, `colony`), otherwise from the layout:
 
-```
-<prefix><well><T><replicate>.<ext>
-```
+- `<condition>/<colony>/<file>`: the file's folder is the colony;
+- `<condition>/<name>T<n>.csv`: the name without the trailing `T<n>` is the colony (`ConditionA_W1T2.csv` -> `ConditionA_W1`).
 
-Examples: `ConditionA_W1T1.csv`, `ConditionB_W2T2.txt`, `ConditionC_W3T1.csv`
-
-The pipeline extracts the well/replicate ID (e.g. `W1`) from the filename and groups all technical replicates of that biological replicate together so they never straddle the train/test boundary in cross-validation. If your filenames do not follow this pattern, grouping falls back to per-file (each file is its own group), which disables grouping but does not cause an error.
+If every file ends up as its own colony the run warns; a condition with fewer than two colonies stops it. `python src/shared/grouping.py data/<experiment>` writes a manifest to check.
 
 ## Configuration
 
-After placing your data here, set `EXPERIMENT` in **config.json** (recommended) or `config.py`:
+After placing your data here, set `EXPERIMENT` in **config.json** (or pass `--experiment`):
 
 ```json
 { "EXPERIMENT": "your_experiment_name" }

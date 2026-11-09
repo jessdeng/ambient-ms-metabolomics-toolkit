@@ -7,7 +7,7 @@ import matplotlib.ticker as ticker
 from matplotlib.lines import Line2D
 import seaborn as sns
 
-from src.shared.plot_style import apply_style, pub_savefig
+from shared.plot_style import apply_style, pub_savefig
 
 apply_style()
 
@@ -23,8 +23,8 @@ _CB_PALETTE = [
 ]
 
 _GRAY_STEM   = '#BBBBBB'   # non-featured peak colour
-HIGH_LABEL   = 'Cross-family consensus'               # headline tier (family-aware rank rule)
-ENS_LABEL    = 'Candidate feature (top-N in \u2265 2 methods)'   # remaining candidates
+HIGH_LABEL   = 'Candidate, consistent across colonies'   # bold, labelled tier
+ENS_LABEL    = 'Candidate'                               # top-N in >= MIN_RANKERS rankers
 _STEM_TOP    = 105         # y-axis ceiling (% RA) — 5 % headroom above 100
 
 
@@ -32,29 +32,15 @@ _STEM_TOP    = 105         # y-axis ceiling (% RA) — 5 % headroom above 100
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _feature_tiers(overlap_df, min_n_methods, high_mask=None):
-    """Return (feat_all, feat_high) as numpy arrays of m/z values.
-
-    ``high_mask`` (boolean array/Series aligned with ``overlap_df``) marks the
-    headline cross-family-consensus features; every row of ``overlap_df`` is drawn
-    as a candidate and the masked rows are drawn as the bold tier. Without it the
-    legacy rule is used (n_methods >= min_n_methods, top quartile as the bold tier).
-    """
-    if high_mask is not None:
-        high_mask = np.asarray(high_mask, dtype=bool)
-        if high_mask.shape[0] != len(overlap_df):
-            raise ValueError("high_mask must be aligned with overlap_df rows")
-        return overlap_df['mz'].values, overlap_df['mz'].values[high_mask]
-    if 'n_methods' in overlap_df.columns:
-        feat_df   = overlap_df[overlap_df['n_methods'] >= min_n_methods].copy()
-        hi_thresh = max(int(np.percentile(feat_df['n_methods'], 75)),
-                        min_n_methods + 1)
-        feat_high = feat_df[feat_df['n_methods'] >= hi_thresh]['mz'].values
-        feat_all  = feat_df['mz'].values
-    else:
-        feat_all  = overlap_df['mz'].values
-        feat_high = feat_all
-    return feat_all, feat_high
+def _feature_tiers(candidates, high_mask=None):
+    """(all candidate m/z, bold-tier m/z). Bold tier = ``high_mask`` rows (all if None)."""
+    mz = candidates['mz'].to_numpy()
+    if high_mask is None:
+        return mz, mz
+    high_mask = np.asarray(high_mask, dtype=bool)
+    if high_mask.shape[0] != len(candidates):
+        raise ValueError("high_mask must be aligned with the candidate rows")
+    return mz, mz[high_mask]
 
 
 def _hex_to_rgba(hex_color, alpha):
@@ -79,7 +65,7 @@ def _stem_indices(mz, feat_all, feat_high_set):
     """
     Map feature m/z values onto their nearest bin indices, then split into:
       · feat_hi_idx   (list[int]) — high-confidence feature bins
-      · feat_ens_idx  (list[int]) — ensemble-only bins (not high-conf)
+      · feat_ens_idx  (list[int]) — other candidate bins
       · nonfeat_mask  (bool ndarray) — True for all remaining (gray) bins
 
     Pre-computed once per figure; the same index sets are reused across
@@ -171,8 +157,8 @@ def _select_labels(mz_vals, ra_vals, x_max=1200, min_gap_da=15, max_labels=15):
 # ---------------------------------------------------------------------------
 
 def plot_spectrum_with_features(
-    X_binned, mz, y_labels, overlap_df, experiment_name, out_path,
-    min_n_methods=1, interactive=False, high_mask=None,
+    X_binned, mz, y_labels, candidates, experiment_name, out_path,
+    high_mask=None, interactive=False,
 ):
     """
     Centroid-style mass spectrum — 5-panel small-multiples facet grid.
@@ -182,12 +168,11 @@ def plot_spectrum_with_features(
     X_binned        : (n_samples, n_bins) array of binned intensities
     mz              : (n_bins,) array of m/z bin centres
     y_labels        : (n_samples,) array of group labels
-    overlap_df      : DataFrame with columns ['mz', 'n_methods']
+    candidates      : DataFrame with an 'mz' column (one row per candidate)
     experiment_name : string for the figure title
     out_path        : output file path (.png for static, .html for interactive)
-    min_n_methods   : legacy n_methods threshold (ignored when high_mask is given)
-    high_mask       : boolean array aligned with overlap_df rows marking the
-                      cross-family-consensus features (bold, labelled tier)
+    high_mask       : boolean array aligned with the candidate rows marking the
+                      bold, labelled tier (candidates consistent across colonies)
     interactive     : False → static Matplotlib PNG; True → Plotly HTML
 
     Design
@@ -199,11 +184,11 @@ def plot_spectrum_with_features(
     · 5-panel small-multiples grid, shared X and Y axes — panels are
       directly comparable without any manual rescaling.
     · In each panel, the focal group's non-featured bins appear as thin
-      silver-gray stems.  Candidate and cross-family-consensus features are drawn
+      silver-gray stems.  Candidates are drawn
       in the group's palette colour with a ● marker at the stem tip.
     · No ±1 SD clouds (SD fill does not translate to a centroid representation).
     """
-    feat_all, feat_high = _feature_tiers(overlap_df, min_n_methods, high_mask)
+    feat_all, feat_high = _feature_tiers(candidates, high_mask)
     groups              = sorted(np.unique(y_labels))
     avgs_ra             = _normalise_means(X_binned, y_labels, groups)
 
@@ -238,7 +223,7 @@ def _plot_matplotlib(mz, groups, avgs_ra,
     --------------------
     Gray  (#BBBBBB, lw=0.5)   — non-featured peaks (background signal)
     Color (lw=0.85, α=0.62)   — candidate-only features (colored stem, no label)
-    Color (lw=1.4,  α=0.95)   — cross-family-consensus features (bold stem +
+    Color (lw=1.4,  α=0.95)   — colony-consistent candidates (bold stem +
                                  rotated m/z text label above peak apex)
 
     X-axis
@@ -286,7 +271,7 @@ def _plot_matplotlib(mz, groups, avgs_ra,
                 colors=color, linewidths=0.85, alpha=0.62, zorder=3,
             )
 
-        # ── Cross-family consensus features: bold stem + m/z text label ──────────
+        # ── Colony-consistent candidates: bold stem + m/z text label ──────────
         if len(hi_idx):
             mz_h = mz[hi_idx]
             ra_h = ra[hi_idx]
@@ -381,7 +366,7 @@ def _plot_plotly(mz, groups, avgs_ra,
     Each panel contains:
       · Gray stems for non-featured bins
       · Group-colored stems (medium) for candidate-only features
-      · Group-colored stems (bold) for cross-family-consensus features,
+      · Group-colored stems (bold) for colony-consistent candidates,
         with m/z text labels (1 d.p.) above each labeled peak.
         Labels use the same _select_labels() greedy filter as the
         Matplotlib backend to prevent crowding.
@@ -453,7 +438,7 @@ def _plot_plotly(mz, groups, avgs_ra,
                 ),
             ), row=row, col=1)
 
-        # ── Cross-family consensus: bold stems + m/z text labels ─────────────────
+        # ── Colony-consistent candidates: bold stems + m/z text labels ─────────────────
         if len(hi_idx):
             mz_h, ra_h = mz[hi_idx], ra[hi_idx]
             xs_h, ys_h = _plotly_stems(mz_h, ra_h)
@@ -539,8 +524,8 @@ def _plot_plotly(mz, groups, avgs_ra,
             text=(
                 'Stem height = group mean  |  '
                 'Gray = non-featured  |  '
-                'Thin colored = candidate feature (\u2265 2 methods)  |  '
-                'Bold colored + label = cross-family consensus (m/z, 1 d.p.)  |  '
+                'Thin colored = candidate  |  '
+                'Bold colored + label = candidate consistent across colonies (m/z, 1 d.p.)  |  '
                 'Y-axis normalised to dataset maximum'
             ),
             xref='paper', yref='paper', x=0.5, y=-0.04,

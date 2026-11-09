@@ -31,7 +31,6 @@ If you already have the repository folder (for example a GitHub clone or a downl
 cd ~/Documents
 git clone https://github.com/jessdeng/ambient-ms-metabolomics-toolkit.git
 cd ambient-ms-metabolomics-toolkit
-git checkout release/toolkit-v2      # the updated version (until it is merged into main)
 ```
 
 If macOS asks to install the "command line developer tools" for `git`, click Install, then repeat the command.
@@ -57,13 +56,13 @@ The prompt now starts with `(ms-toolkit)`.
 
 ```bash
 python -m pytest -q
-python src/standard/run_analysis.py --config config.json
+python src/standard/run_analysis.py --experiment sample_experiment
 ```
 
-The first command should end with `299 passed`. The second analyses the small bundled demo, should finish in seconds, and ends with `Done in … s. Results: …/results/standard/sample_experiment`. Open that folder in Finder:
+The first command should end with `34 passed`. The second analyses the small bundled demo, finishes in a few seconds, and ends with `Done in … s -> …/results/sample_experiment`. Open that folder in Finder:
 
 ```bash
-open results/standard/sample_experiment
+open results/sample_experiment
 ```
 
 ## 5. Add your own data
@@ -85,12 +84,12 @@ open results/standard/sample_experiment
    This writes `data/my_experiment/metadata_manifest.csv`.
 3. Open `metadata_manifest.csv` in Excel or Numbers. For every spectrum, check that:
    - `class` is its condition;
-   - `biological_replicate_group` is its **colony** (biological replicate). All technical replicates of one colony must share the same value;
+   - `colony` is its **colony** (biological replicate). All technical replicates of one colony must share the same value;
    - `technical_replicate` is the repeat number (1, 2, 3).
 
    Fix any value that was guessed wrongly from the file name (for example a typo such as `AmbB5T1` next to `AmberB5T2`). Save it as CSV with the same name.
 
-   *Why this matters:* cross-validation holds out whole colonies. If two replicates of one colony end up in different groups, accuracy is inflated.
+   *Why this matters:* the colony is the experimental unit. Its technical replicates are averaged before any feature is ranked, so a misnamed file would create a fake extra colony.
 
 Your data stay on your computer: everything under `data/` is excluded from Git.
 
@@ -101,49 +100,48 @@ Your data stay on your computer: everything under `data/` is excluded from Git.
    cp configs/standard.json configs/my_settings.json
    open -e configs/my_settings.json        # opens it in TextEdit
    ```
-   Check `MZ_MIN`/`MZ_MAX` (100–2000 for the LMJ-SSP data) and the preprocessing choices. You do not need to change anything else. Save the file. In TextEdit, use Format → Make Plain Text if asked.
+   Set `EXPERIMENT`, and check `MZ_MIN`/`MZ_MAX` (100–2000 for the LMJ-SSP data) and `EXPECTED_TECH_REPS` (3 = stop if a colony does not have three spectra). You do not need to change anything else. Save the file. In TextEdit, use Format → Make Plain Text if asked.
 2. Run:
    ```bash
    python src/standard/run_analysis.py --config configs/my_settings.json --experiment my_experiment
    ```
-   One isolate (45 spectra) took about 90–105 s on a laptop. Progress messages appear as the steps run.
+   One isolate (45 spectra) takes about 10–15 s on a laptop.
 3. Repeat with `--experiment experiment_b`, `--experiment experiment_c`, and so on.
 
 ## 7. Find and read the results
 
 ```bash
-open results/standard/my_experiment
+open results/my_experiment
 ```
 
 Start with these files:
 
 | File | What to look at |
 |---|---|
-| `classifier_accuracy_my_experiment.csv` | test accuracy (3-fold colony-grouped CV, mean ± SD) and leave-one-colony-out accuracy for the six classifiers, with the chance level |
+| `candidates_my_experiment.csv` | the prioritised m/z bins: how they rank, which condition stands apart (`colony_pattern`), how reproducible the sprays are (`technical_cv_pct`), whether the raw profile shows a real peak (`apex_mz`, `baseline_share`) and any isotope/adduct partners |
 | `pca_my_experiment.png` + `pca_explained_variance_my_experiment.csv` | dominant structure; for each PC, how much of its variance follows condition-plate, colony or technical replicate |
-| `feature_rankings_my_experiment.csv` | every m/z bin: rank in each method, `n_methods` (original ensemble count), `n_families`, multi-component VIP rank, `signal_mz` |
-| `vip_my_experiment.csv`, `plsda_q2_profile_my_experiment.csv` | component-1 and multi-component VIP; Q² by number of latent variables |
-| `spectrum_features_my_experiment.png` | where the candidate features sit in the spectra |
+| `feature_rankings_my_experiment.csv` | every m/z bin, with the same columns |
+| `ranker_concordance_my_experiment.csv` | how far the rankers agree, against chance |
+| `spectrum_features_my_experiment.png` | where the candidates sit in the spectra |
 
-Tip: in Excel, sort `feature_rankings` by `n_methods` and then by `n_families`. Before following up a feature, look at its raw spectral region: is it a resolved peak, or the edge of a neighbouring peak?
-
-## 8. Optional analyses
-
-These are slow and only needed for validation work; see the README section "Optional validation analyses". Before running several of them, type:
+Then make the figures:
 
 ```bash
-export VECLIB_MAXIMUM_THREADS=1 OMP_NUM_THREADS=1
+python src/scripts/condition_abundance.py my_experiment
+python src/scripts/corroboration_figure.py my_experiment
 ```
 
-and run them one at a time.
+Before following up a feature, look at its raw spectral region: is it a resolved peak, or the edge of a neighbouring peak? `baseline_share` near 1 means no resolved peak.
 
-## 9. Reproduce the original (published) Table 1
+## 8. Reproduce the manuscript's Table 1
+
+The earlier version, with the six-classifier comparison, is kept at a Git tag:
 
 ```bash
+git checkout v2-table1-snapshot
 python src/standard/run_analysis.py --config configs/manuscript_original.json --experiment my_experiment
+git checkout main
 ```
-
-This uses the original processing (5000-point resampling, file-name grouping).
 
 ## Troubleshooting
 
@@ -151,22 +149,13 @@ This uses the original processing (5000-point resampling, file-name grouping).
 |---|---|
 | `conda: command not found` | Open a new Terminal window after installing Miniforge, or rerun its installer and answer `yes` to "initialise". |
 | `EXPERIMENT ... contains no .csv/.txt spectra` | The name after `--experiment` must match a folder in `data/` exactly (capitals, spaces). The message lists the available folders. |
-| `Manifest/grouping inconsistency` | A file is missing from `metadata_manifest.csv`, or its `class` differs from its folder. Edit the CSV and rerun. |
+| `file(s) missing from metadata_manifest.csv` | A spectrum has no row in the manifest. Add it and rerun. |
+| `Colonies without 3 spectra` | A colony has a different number of files, often a misnamed file. Fix its `colony` in the manifest. |
 | `ModuleNotFoundError` | The environment is not active: `conda activate ms-toolkit`. |
-| The Mac becomes very slow | Run one analysis at a time and set `export VECLIB_MAXIMUM_THREADS=1` first. |
 
 ## What has and has not been tested
 
-- **Tested by the developer (macOS, 8-core laptop):**
-  - a clean environment built from the pinned versions;
-  - a fresh copy of the repository;
-  - all tests;
-  - the demo analysis;
-  - the standard analysis on four real isolates;
-  - identical results between the fresh copy and the development copy.
-- **Still to be tested by you on your own Mac:**
-  - installing Miniforge;
-  - `conda env create -f environment.yml` on your chip type;
-  - running the commands above on your copy of the data.
+- **Tested (macOS, development environment):** all tests, the demo analysis, and the analysis plus figure scripts on four real isolates.
+- **Not yet tested:** a clean environment built from `environment.yml`, and a fresh clone on another Mac.
 
 Please report any error message exactly as printed.

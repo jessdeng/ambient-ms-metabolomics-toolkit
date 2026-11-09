@@ -75,15 +75,3 @@ def test_independent_neighbours_are_not_candidates():
     Xb, mzb = bin_features(raw, RAW_MZ, 0.5)
     _, pairs = build_signal_groups(Xb, mzb, raw, RAW_MZ, GROUPS, mz0=150.0)
     assert _decision(pairs, 159.75) is None
-
-
-def test_nominal_bins_keep_unit_resolution_peak_in_one_bin():
-    from standard.preprocessing import bin_features_nominal
-    mz = np.round(np.arange(150.0, 170.0001, 0.1), 1)
-    for centre in (160.0, 160.2, 159.9):
-        x = np.exp(-0.5 * ((mz - centre) / (0.8 / 2.3548)) ** 2)
-        Xb, lab = bin_features_nominal(x[None, :], mz, offset=0.6)
-        assert lab[np.argmax(Xb[0])] == 160.0
-        assert Xb[0, lab == 160.0][0] / Xb.sum() > 0.8     # Gaussian, FWHM 0.8, apex <= 0.2 Da off-centre
-    Xb, lab = bin_features_nominal(np.ones((2, len(mz))), mz, offset=0.6)
-    assert np.allclose(Xb.sum(1), len(mz)) and np.all(np.diff(lab) == 1)

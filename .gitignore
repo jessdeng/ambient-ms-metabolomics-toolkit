@@ -5,14 +5,7 @@ data/*
 
 # Results — generated outputs; reproducible from data + code
 results/*
-!results/README.md
-!results/standard/
-results/standard/*
-!results/standard/.gitkeep
-!results/r_comparable/
-results/r_comparable/*
-!results/r_comparable/.gitkeep
-results/validated/
+!results/.gitkeep
 
 # Manuscript drafts and local configs that may carry private paths
 *.docx
@@ -61,10 +54,5 @@ htmlcov/
 # Logs
 *.log
 
-# >>> consolidate_data: local real datasets — DO NOT COMMIT >>>
-# All of data/* is already ignored above, so any private dataset placed under
-# data/ is never committed. consolidate_data.py appends per-dataset entries
-# here on your local machine; do not commit those local edits.
 # Keep the synthetic demo dataset tracked even though data/* is ignored above:
 !/data/sample_experiment/
-# <<< consolidate_data <<<
