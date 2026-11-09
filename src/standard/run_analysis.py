@@ -15,6 +15,13 @@ _ROOT = os.path.dirname(_SRC)
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, _SRC)
 
+# The matrices here are tiny (tens of spectra); multi-threaded BLAS (Apple
+# Accelerate in particular) spends far longer coordinating threads than computing:
+# logistic regression went from 16 s to 0.08 s per fit with one thread. Must be
+# set before numpy is imported. An explicit setting in the environment wins.
+for _v in ('VECLIB_MAXIMUM_THREADS', 'OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS'):
+    os.environ.setdefault(_v, '1')
+
 
 def _parse_cli():
     import argparse
@@ -37,7 +44,7 @@ import numpy as np
 import pandas as pd
 
 import config
-from standard.preprocessing import load_experiment, build_matrices, scale
+from standard.preprocessing import load_experiment, build_matrices, scale, tic_normalise
 from standard.pipeline import plot_vip
 from shared.grouping import resolve_design
 from shared.ranking import (colony_means, rank_features, colony_consistency,
@@ -46,6 +53,7 @@ from shared.ranking import (colony_means, rank_features, colony_consistency,
 from shared.feature_groups import build_signal_groups
 from shared.evidence import candidate_evidence
 from shared.pca import run_pca
+from shared.classifiers import compare_classifiers, plot_accuracy_comparison
 from shared.visualization import plot_spectrum_with_features
 from shared.runtime import resolve_experiment_dir, write_run_manifest
 
@@ -124,6 +132,16 @@ def main():
                                     os.path.join(out, f'spectrum_features_{safe}.png'),
                                     high_mask=cand['colonies_consistent'].to_numpy())
 
+    # -- classifier comparison (condition-plate discriminability) ----------------
+    acc = None
+    if config.RUN_CLASSIFIERS:
+        folds, acc = compare_classifiers(tic_normalise(M['binned']), cond, colony, config.CV_FOLDS,
+                                         config.N_CV_REPEATS, config.RANDOM_SEED, config.SCALING,
+                                         config.VARIANCE_PERCENTILE, config.ABUNDANCE_PERCENTILE)
+        acc.to_csv(os.path.join(out, f'classifier_accuracy_{safe}.csv'), index=False)
+        plot_accuracy_comparison(folds, experiment, os.path.join(out, f'classifier_comparison_{safe}.png'),
+                                 chance=1.0 / len(np.unique(cond)))
+
     write_run_manifest(out, _ROOT, config, exp_dir,
                        extra={'rf_seed_agreement_topN': info['rf_seed_agreement']})
 
@@ -137,6 +155,11 @@ def main():
     print(f"    random forest seed-to-seed agreement: {info['rf_seed_agreement']:.2f}")
     print(f"  Candidates (top-{n} in >= {config.MIN_RANKERS} of {len(VOTERS)} rankers): {len(cand)}; "
           f"consistent across all colonies: {int(cand['colonies_consistent'].sum()) if len(cand) else 0}")
+    if acc is not None:
+        print(f"  Classifier comparison ({acc.cv.iloc[0]}; chance {acc.chance_level.iloc[0]:.2f}):")
+        for r in acc.itertuples():
+            print(f"    {r.model:20} test {r.test_accuracy_mean:.2f} +/- {r.test_accuracy_sd:.2f}   "
+                  f"train {r.train_accuracy_mean:.2f}")
     print(f"Done in {time.time() - t0:.0f} s -> {out}")
 
 

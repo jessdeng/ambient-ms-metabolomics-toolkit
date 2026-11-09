@@ -43,6 +43,13 @@ MIN_RANKERS = 2                       # candidate = top-N in >= this many of the
 RF_SEEDS = 25                         # random forest: sensitivity column, not a voter
 RANDOM_SEED = 42
 
+# ── Classifier comparison (condition-plate discriminability) ────────────────────
+# Six models (RF, SVM, GB, LR, LDA, Ridge), default settings, folds that hold out
+# whole colonies. Produces classifier_comparison_<exp>.png and _accuracy_<exp>.csv.
+RUN_CLASSIFIERS = True
+CV_FOLDS = 5                          # reduced to the smallest colonies-per-condition
+N_CV_REPEATS = 10                     # repeats with different colony splits
+
 # ── Descriptive outputs ─────────────────────────────────────────────────────────
 N_PCA_COMPONENTS = 5
 N_TOP_VIP = 30                        # features shown in the VIP plot

@@ -12,12 +12,14 @@ def test_demo_run_writes_the_expected_tables(tmp_path, monkeypatch):
     monkeypatch.setattr(run_analysis, '_ROOT', str(tmp_path))
     monkeypatch.setenv('TOOLKIT_EXPERIMENT', 'sample_experiment')
     monkeypatch.setattr(run_analysis.config, 'RF_SEEDS', 2)
+    monkeypatch.setattr(run_analysis.config, 'N_CV_REPEATS', 1)
     run_analysis.main()
     out = tmp_path / 'results' / 'sample_experiment'
     for f in ('feature_rankings', 'candidates', 'ranker_concordance', 'signal_groups',
-              'pca_explained_variance'):
+              'pca_explained_variance', 'classifier_accuracy'):
         assert (out / f'{f}_sample_experiment.csv').exists(), f
     assert (out / 'run_manifest.json').exists()
+    assert (out / 'classifier_comparison_sample_experiment.png').exists()
     ranks = pd.read_csv(out / 'feature_rankings_sample_experiment.csv')
     cand = pd.read_csv(out / 'candidates_sample_experiment.csv')
     assert {'screen_F', 'screen_q', 'vip_score', 'rf_score', 'frac_condition_plate',

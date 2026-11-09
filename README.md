@@ -62,7 +62,11 @@ Then fix `class` and `colony` for any file named inconsistently (e.g. `AmbB5T1` 
 
    Ridge and the random forest do not vote. With 15 colonies and about 2,700 bins, Ridge's top-50 is set by its penalty: on the four light-exposure isolates it shared at most 2 of 50 bins with either voter for every α from 1 to 10⁴. The forest's top-50 changes with the random seed (seed-to-seed agreement 0.23–0.47). Both are printed in every run.
 8. **Candidates.** Top-N in at least `MIN_RANKERS` voters (default: both).
-9. **Evidence for each bin:**
+9. **Classifier comparison.** Six models with default settings: Random Forest, linear SVM, Gradient Boosting, Logistic Regression, LDA, Ridge.
+   - **Evaluation:** folds hold out whole colonies (3-fold × 10 repeats with three colonies per condition). Filters, log offset and scaling are refitted on the training colonies in every fold.
+   - **Output:** test accuracy per fold, and mean train vs test accuracy.
+   - **Reading it:** accuracy measures how well the condition-plates can be told apart, not a light effect. The fold-to-fold spread is as large as the differences between models, so which model "wins" is not a stable finding with three colonies per condition. On F11A the earlier version of this pipeline, which differs in preprocessing, ranked Ridge first; this one ranks Gradient Boosting first.
+10. **Evidence for each bin:**
    - share of variance that is condition-plate / colony / technical;
    - technical %CV;
    - whether one condition's colonies all sit above (or below) every other colony (`colony_pattern`);
@@ -82,6 +86,7 @@ All settings and their defaults are in [config.py](config.py). Override them in 
 | `SCALING` | `autoscale` | for the multivariate rankers; or `pareto` |
 | `TOP_N_FEATURES`, `MIN_RANKERS` | 50, 2 | candidate rule |
 | `RF_SEEDS`, `RANDOM_SEED` | 25, 42 | random-forest sensitivity ranking |
+| `RUN_CLASSIFIERS`, `CV_FOLDS`, `N_CV_REPEATS` | true, 5, 10 | classifier comparison; folds reduced to the smallest colonies-per-condition |
 | `N_PCA_COMPONENTS`, `N_TOP_VIP`, `SIGNAL_R_MIN` | 5, 30, 0.9 | descriptive outputs |
 
 ## Outputs (`results/<experiment>/`)
@@ -93,6 +98,7 @@ All settings and their defaults are in [config.py](config.py). Override them in 
 | `ranker_concordance_<exp>.csv` | top-N Jaccard between rankers, with the chance level |
 | `pca_*` | explained variance with its condition-plate / colony / technical split, scores, top loadings, figure |
 | `signal_groups_<exp>.csv` | adjacent bins merged into one peak when the raw profile supports it |
+| `classifier_comparison_<exp>.png`, `classifier_accuracy_<exp>.csv` | test accuracy per fold for the six classifiers, train vs test; mean ± SD per model with the chance level |
 | `vip_scores_<exp>.png`, `spectrum_features_<exp>.png` | top-VIP plot; condition-mean spectra with candidates marked |
 | `run_manifest.json` | settings, package versions and Git commit of the run |
 
@@ -109,7 +115,7 @@ python src/scripts/pca_overview.py EXP_A EXP_B EXP_C EXP_D # PCA of several expe
 
 ## Reproducing the manuscript's Table 1
 
-The earlier version (six classifiers, colony-grouped CV, the legacy 5000-point resampling) is frozen at tag `v2-table1-snapshot`:
+The exact published Table 1 used the earlier version (legacy 5000-point resampling, preprocessing before the folds), frozen at tag `v2-table1-snapshot`:
 
 ```bash
 git checkout v2-table1-snapshot

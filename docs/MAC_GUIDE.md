@@ -105,7 +105,7 @@ Your data stay on your computer: everything under `data/` is excluded from Git.
    ```bash
    python src/standard/run_analysis.py --config configs/my_settings.json --experiment my_experiment
    ```
-   One isolate (45 spectra) takes about 10–15 s on a laptop.
+   One isolate (45 spectra) takes about 3–4 minutes on a laptop, almost all of it the classifier comparison (Gradient Boosting is slow). Set `"RUN_CLASSIFIERS": false` in your settings file for a 15-second run without it.
 3. Repeat with `--experiment experiment_b`, `--experiment experiment_c`, and so on.
 
 ## 7. Find and read the results
@@ -122,6 +122,7 @@ Start with these files:
 | `pca_my_experiment.png` + `pca_explained_variance_my_experiment.csv` | dominant structure; for each PC, how much of its variance follows condition-plate, colony or technical replicate |
 | `feature_rankings_my_experiment.csv` | every m/z bin, with the same columns |
 | `ranker_concordance_my_experiment.csv` | how far the rankers agree, against chance |
+| `classifier_comparison_my_experiment.png` + `classifier_accuracy_my_experiment.csv` | test accuracy per fold for six classifiers, train vs test (how well the condition-plates can be told apart) |
 | `spectrum_features_my_experiment.png` | where the candidates sit in the spectra |
 
 Then make the figures:
@@ -135,7 +136,7 @@ Before following up a feature, look at its raw spectral region: is it a resolved
 
 ## 8. Reproduce the manuscript's Table 1
 
-The earlier version, with the six-classifier comparison, is kept at a Git tag:
+The exact published numbers used the earlier version, kept at a Git tag:
 
 ```bash
 git checkout v2-table1-snapshot
