@@ -63,9 +63,9 @@ Then fix `class` and `colony` for any file named inconsistently (e.g. `AmbB5T1` 
    Ridge and the random forest do not vote. With 15 colonies and about 2,700 bins, Ridge's top-50 is set by its penalty: on the four light-exposure isolates it shared at most 2 of 50 bins with either voter for every α from 1 to 10⁴. The forest's top-50 changes with the random seed (seed-to-seed agreement 0.23–0.47). Both are printed in every run.
 8. **Candidates.** Top-N in at least `MIN_RANKERS` voters (default: both).
 9. **Classifier comparison.** Six models with default settings: Random Forest, linear SVM, Gradient Boosting, Logistic Regression, LDA, Ridge.
-   - **Evaluation:** folds hold out whole colonies (3-fold × 10 repeats with three colonies per condition). Filters, log offset and scaling are refitted on the training colonies in every fold.
+   - **Evaluation:** folds hold out whole colonies and keep every condition in every test fold (3-fold × 10 repeats with three colonies per condition). Filters, log offset and scaling are refitted on the training colonies in every fold.
    - **Output:** test accuracy per fold, and mean train vs test accuracy.
-   - **Reading it:** accuracy measures how well the condition-plates can be told apart, not a light effect. The fold-to-fold spread is as large as the differences between models, so which model "wins" is not a stable finding with three colonies per condition. On F11A the earlier version of this pipeline, which differs in preprocessing, ranked Ridge first; this one ranks Gradient Boosting first.
+   - **Reading it:** accuracy measures how well the condition-plates can be told apart, not a light effect. The fold-to-fold spread is as large as the differences between models, so which model "wins" is not a stable finding with three colonies per condition. On F11A the earlier version of this pipeline, which differs in preprocessing, ranked Ridge first; this one ranks Random Forest first, and with folds that were not balanced by condition it ranked Gradient Boosting first.
 10. **Evidence for each bin:**
    - share of variance that is condition-plate / colony / technical;
    - technical %CV;
@@ -115,9 +115,9 @@ python src/scripts/pca_overview.py EXP_A EXP_B EXP_C EXP_D # PCA of several expe
 
 ## Validation helpers
 
-`src/shared/validation.py` is not run by default. Use it from Python, started in the repository root, to score a model more strictly than the classifier comparison does:
+`src/shared/validation.py` is not run by default. Use it from Python, started in the repository root, to go beyond the classifier comparison (per-repeat and colony-level accuracy, a permutation test, PLS-DA):
 
-- **`RepeatedColonyKFold`** holds out whole colonies and keeps every condition in every test fold. `StratifiedGroupKFold` with shuffling does not guarantee the second property: with three colonies per condition, a test fold can hold two colonies of one condition and none of another.
+- **`RepeatedColonyKFold`** holds out whole colonies and keeps every condition in every test fold. `StratifiedGroupKFold` with shuffling does not guarantee the second property: with three colonies per condition, a test fold can hold two colonies of one condition and none of another. The classifier comparison uses these folds too.
 - **`grouped_cv`** returns, for each repeat, the accuracy and balanced accuracy over spectra and the accuracy over colonies (majority vote of a colony's spectra). Filters, log offset and scaling are refitted on the training colonies in every fold.
 - **`colony_permutation_test`** shuffles the condition labels among colonies, so a colony's spectra keep one label, and repeats the whole procedure for every permutation. The null distribution is reproducible from the seed whatever `n_jobs` is.
 - **`PLSDAClassifier`** scores the model behind VIP in the same way as the other classifiers.

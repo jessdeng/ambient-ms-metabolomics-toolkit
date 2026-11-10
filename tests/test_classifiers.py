@@ -27,6 +27,7 @@ def test_folds_hold_out_whole_colonies_and_summary_is_complete(monkeypatch):
     folds, summary = cl.compare_classifiers(_tic(), COND, COL, n_splits=5, n_repeats=2, seed=0)
     assert len(seen) == 6                                   # 3 folds (3 colonies/condition) x 2 repeats
     assert all(not (a & b) for a, b in seen)
+    assert all(sorted(c.split('::')[0] for c in te) == list('ABC') for _, te in seen)   # one colony per condition
     assert list(summary.model) == list(cl.MODELS)
     assert (summary.n_folds == 6).all() and summary.cv.iloc[0] == '3-fold colony-grouped x 2'
     assert summary.test_accuracy_mean.between(0, 1).all()

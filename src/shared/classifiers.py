@@ -2,7 +2,8 @@
 Classifier comparison: how well does each model tell the conditions apart?
 
 Six models with fixed, default settings are evaluated with folds that hold out
-whole colonies (StratifiedGroupKFold), repeated with different splits. Inside
+whole colonies and keep every condition in every test fold (RepeatedColonyKFold
+in shared/validation.py), repeated with different splits. Inside
 every fold the label-free filters, the log offset and the scaling are fitted on
 the training spectra only; TIC normalisation is per spectrum and needs no fit.
 
@@ -24,7 +25,6 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.metrics import accuracy_score, balanced_accuracy_score
-from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.svm import SVC
 
 from standard.preprocessing import feature_filter_mask
@@ -61,28 +61,31 @@ def compare_classifiers(X_tic, condition, colony_id, n_splits=5, n_repeats=10, s
                         scaling='autoscale', variance_percentile=25, abundance_percentile=5):
     """Colony-grouped, repeated CV of the six models on TIC-normalised spectra.
 
-    ``n_splits`` is reduced to the smallest number of colonies in any condition.
+    ``n_splits`` is reduced to the smallest number of colonies in any condition,
+    so every test fold holds at least one whole colony of every condition.
     Returns (per_fold DataFrame, summary DataFrame).
     """
+    from shared.validation import RepeatedColonyKFold    # validation imports this module
+
     y, g = np.asarray(condition), np.asarray(colony_id)
     min_col = min(len(set(g[y == c])) for c in np.unique(y))
     k = int(max(2, min(n_splits, min_col)))
+    cv = RepeatedColonyKFold(n_splits=k, n_repeats=n_repeats, random_state=seed)
     rows = []
-    for r in range(n_repeats):
-        cv = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=seed + r)
-        for f, (tr, te) in enumerate(cv.split(X_tic, y, g)):
-            assert not set(g[tr]) & set(g[te]), "a colony is in both training and test"
-            Xtr, Xte = _fold_matrices(X_tic, tr, te, scaling, variance_percentile, abundance_percentile)
-            for name, make in MODELS.items():
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('ignore', message='Variables are collinear')  # LDA, p >> n
-                    m = make(seed).fit(Xtr, y[tr])
-                pred = m.predict(Xte)
-                rows.append(dict(model=name, repeat=r, fold=f,
-                                 test_accuracy=accuracy_score(y[te], pred),
-                                 test_balanced_accuracy=balanced_accuracy_score(y[te], pred),
-                                 train_accuracy=accuracy_score(y[tr], m.predict(Xtr)),
-                                 test_colonies=len(set(g[te]))))
+    for i, (tr, te) in enumerate(cv.split(X_tic, y, g)):
+        r, f = divmod(i, k)
+        assert not set(g[tr]) & set(g[te]), "a colony is in both training and test"
+        Xtr, Xte = _fold_matrices(X_tic, tr, te, scaling, variance_percentile, abundance_percentile)
+        for name, make in MODELS.items():
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', message='Variables are collinear')  # LDA, p >> n
+                m = make(seed).fit(Xtr, y[tr])
+            pred = m.predict(Xte)
+            rows.append(dict(model=name, repeat=r, fold=f,
+                             test_accuracy=accuracy_score(y[te], pred),
+                             test_balanced_accuracy=balanced_accuracy_score(y[te], pred),
+                             train_accuracy=accuracy_score(y[tr], m.predict(Xtr)),
+                             test_colonies=len(set(g[te]))))
     folds = pd.DataFrame(rows)
     summary = (folds.groupby('model', sort=False)
                .agg(test_accuracy_mean=('test_accuracy', 'mean'), test_accuracy_sd=('test_accuracy', 'std'),
