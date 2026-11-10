@@ -113,6 +113,36 @@ python src/scripts/condition_spectrum.py MY_EXPERIMENT     # interactive spectra
 python src/scripts/pca_overview.py EXP_A EXP_B EXP_C EXP_D # PCA of several experiments side by side
 ```
 
+## Validation helpers
+
+`src/shared/validation.py` is not run by default. Use it from Python, started in the repository root, to score a model more strictly than the classifier comparison does:
+
+- **`RepeatedColonyKFold`** holds out whole colonies and keeps every condition in every test fold. `StratifiedGroupKFold` with shuffling does not guarantee the second property: with three colonies per condition, a test fold can hold two colonies of one condition and none of another.
+- **`grouped_cv`** returns, for each repeat, the accuracy and balanced accuracy over spectra and the accuracy over colonies (majority vote of a colony's spectra). Filters, log offset and scaling are refitted on the training colonies in every fold.
+- **`colony_permutation_test`** shuffles the condition labels among colonies, so a colony's spectra keep one label, and repeats the whole procedure for every permutation. The null distribution is reproducible from the seed whatever `n_jobs` is.
+- **`PLSDAClassifier`** scores the model behind VIP in the same way as the other classifiers.
+
+```python
+import sys
+sys.path[:0] = ['src', '.']
+from sklearn.linear_model import RidgeClassifier
+from standard.preprocessing import load_experiment, build_matrices, tic_normalise
+from shared.grouping import resolve_design
+from shared.validation import RepeatedColonyKFold, grouped_cv, colony_permutation_test
+
+exp_dir = 'data/sample_experiment'
+X_raw, names, mz = load_experiment(exp_dir)
+condition, colony = resolve_design(exp_dir, names)
+X_tic = tic_normalise(build_matrices(X_raw, mz)['binned'])
+
+cv = RepeatedColonyKFold(n_splits=3, n_repeats=10, random_state=42)
+scores = grouped_cv(RidgeClassifier(), X_tic, condition, colony, cv)
+observed, null, p = colony_permutation_test(RidgeClassifier(), X_tic, condition, colony, cv,
+                                            n_permutations=1000, n_jobs=4)
+```
+
+The smallest attainable p-value is 1 / (permutations + 1). As everywhere in this toolkit, a small p-value shows that the condition-plates can be told apart; it is not a test of a light effect.
+
 ## Reproducing the manuscript's Table 1
 
 The exact published Table 1 used the earlier version (legacy 5000-point resampling, preprocessing before the folds), frozen at tag `v2-table1-snapshot`:
