@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.ranking import (colony_means, univariate_screen, colony_consistency, variance_partition,
                             technical_cv, rank_features, concordance, benjamini_hochberg, top_set,
-                            VOTERS)
+                            selected_by, VOTERS, METHODS)
 from shared.pca import nested_variance_components
 
 COND = np.repeat(list('ABCDE'), 9)
@@ -44,6 +44,27 @@ def test_voters_find_the_planted_bins_and_sensitivity_does_not_vote():
     assert set(VOTERS) == {'univariate', 'vip'}
     assert table['n_rankers'].max() == 2                           # ridge / rf never vote
     assert 0 <= info['rf_seed_agreement'] <= 1
+
+
+def test_method_comparison_counts_votes_and_families():
+    X = _data(1, effect=1.0)
+    Xc, _, cc = colony_means(X, COL, COND)
+    Xs = (Xc - Xc.mean(0)) / Xc.std(0, ddof=1)
+    table, info = rank_features(Xs, Xc, cc, top_n=10, rf_seeds=2, seed=0)
+    assert list(info['scores']) == ['univariate', 'vip', 'ridge', 'lr', 'svm', 'rf', 'gb']
+    cols = [f'in_{m}_top' for m in METHODS]
+    assert (table['n_methods'] == table[cols].sum(axis=1)).all() and table['n_methods'].max() <= 6
+    assert all(table[c].sum() == 10 for c in cols)                 # top-N of every method
+    assert (table['consensus'] == (table['agg_n_families_topk'] >= 2)).all()
+    assert table.loc[:4, 'n_methods'].min() >= 1 and table.loc[:4, 'n_methods'].mean() >= 2
+    assert (table.loc[:4, 'top_condition_mean'] == 'E').all()
+    assert table.loc[:4, 'mean_margin'].min() > 5                  # planted 10x over the rest
+    strict, _ = rank_features(Xs, Xc, cc, top_n=10, rf_seeds=2, seed=0,
+                              consensus_rule='worst_family_rank', max_worst_rank=10)
+    assert (strict['consensus'] == (strict['agg_worst_family_rank'] <= 10)).all()
+    by = selected_by(table)
+    assert set(by) <= {'', 'screen + VIP', 'method consensus', 'screen + VIP and method consensus'}
+    assert ((by != '') == (table['candidate'] | table['consensus'])).all()
 
 
 def test_colony_consistency():

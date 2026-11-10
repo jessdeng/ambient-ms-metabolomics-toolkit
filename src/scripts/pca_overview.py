@@ -16,7 +16,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 OUT = os.path.join(ROOT, 'results')
 
 
-def main(exps):
+def main(exps, out_dir=None):
+    OUT = out_dir or globals()['OUT']
     fig, axes = plt.subplots(1, len(exps), figsize=(3.2 * len(exps), 3.2), squeeze=False)
     for ax, e in zip(axes[0], exps):
         sc = pd.read_csv(os.path.join(OUT, e, f'pca_scores_{e}.csv'))

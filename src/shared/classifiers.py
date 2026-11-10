@@ -58,12 +58,14 @@ def _fold_matrices(X_tic, tr, te, scaling, variance_percentile, abundance_percen
 
 
 def compare_classifiers(X_tic, condition, colony_id, n_splits=5, n_repeats=10, seed=42,
-                        scaling='autoscale', variance_percentile=25, abundance_percentile=5):
+                        scaling='autoscale', variance_percentile=25, abundance_percentile=5,
+                        progress=None):
     """Colony-grouped, repeated CV of the six models on TIC-normalised spectra.
 
     ``n_splits`` is reduced to the smallest number of colonies in any condition,
     so every test fold holds at least one whole colony of every condition.
-    Returns (per_fold DataFrame, summary DataFrame).
+    ``progress``, if given, is called as progress(repeat, n_repeats) after each
+    repeat. Returns (per_fold DataFrame, summary DataFrame).
     """
     from shared.validation import RepeatedColonyKFold    # validation imports this module
 
@@ -86,6 +88,8 @@ def compare_classifiers(X_tic, condition, colony_id, n_splits=5, n_repeats=10, s
                              test_balanced_accuracy=balanced_accuracy_score(y[te], pred),
                              train_accuracy=accuracy_score(y[tr], m.predict(Xtr)),
                              test_colonies=len(set(g[te]))))
+        if progress is not None and f == k - 1:
+            progress(r + 1, n_repeats)
     folds = pd.DataFrame(rows)
     summary = (folds.groupby('model', sort=False)
                .agg(test_accuracy_mean=('test_accuracy', 'mean'), test_accuracy_sd=('test_accuracy', 'std'),

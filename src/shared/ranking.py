@@ -21,6 +21,14 @@ determined by the data:
   random forest  the list changes with the random seed (seed-to-seed agreement is
                  reported in every run).
 
+Method comparison. Six importance definitions are also computed on the colony
+means and compared (METHODS): component-1 PLS-DA VIP and five classifier-derived
+measures (Ridge, logistic regression, linear SVM, random forest, gradient
+boosting; shared/importance.py). ``n_methods`` counts how many of the six place
+a bin in their top-N. The count is descriptive: Ridge, logistic regression and
+the SVM are closely related, so ``consensus`` uses one vote per model family
+(penalised linear, tree ensembles, PLS; shared/rank_aggregation.py).
+
 Condition and plate are aliased, so screen_p / screen_q describe condition-plate
 separation among colonies; they are not tests of a treatment effect.
 """
@@ -32,10 +40,13 @@ from scipy.stats import hypergeom
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import RidgeClassifier
 
+from shared.importance import fit_importance
+from shared.rank_aggregation import aggregate_ranks, consensus_mask
 from standard.pipeline import compute_vip_1comp
 
 VOTERS = ('univariate', 'vip')
 SENSITIVITY = ('ridge', 'rf')
+METHODS = ('vip', 'ridge', 'lr', 'svm', 'rf', 'gb')     # the six definitions compared
 
 
 def colony_means(X, colony_id, condition):
@@ -87,6 +98,9 @@ def univariate_screen(Xc_log, cond_c):
     out['top_condition'] = conds[means.argmax(0)]
     out['bottom_condition'] = conds[means.argmin(0)]
     out['log2_fc_top_vs_bottom'] = (means.max(0) - means.min(0)) * np.log2(10)
+    out['top_condition_mean'] = out['top_condition']
+    ordered = np.sort(means, axis=0)
+    out['mean_margin'] = 10 ** (ordered[-1] - ordered[-2]) if len(conds) > 1 else np.nan
     for c, m in zip(conds, means):
         out[f'mean_log10_{c}'] = m
     return out
@@ -149,20 +163,29 @@ def technical_cv(X_lin, colony_id):
     return cv.median(axis=0, skipna=True).to_numpy()
 
 
-def rank_features(Xc_scaled, Xc_log, cond_c, top_n=50, min_rankers=2, rf_seeds=25, seed=42):
-    """Scores, ranks and top-N membership for the two voters and the two
-    sensitivity rankings. Returns (table, info) where info holds the scores and
-    the random-forest seed-to-seed agreement."""
+def rank_features(Xc_scaled, Xc_log, cond_c, top_n=50, min_rankers=2, rf_seeds=25, seed=42,
+                  consensus_rule='n_families_topk', max_worst_rank=50, min_families=2):
+    """Scores, ranks and top-N membership for the two voters and the six compared
+    importance definitions. Returns (table, info) where info holds the scores and
+    the random-forest seed-to-seed agreement.
+
+    Columns added for the method comparison: ``n_methods`` (0-6, how many of
+    METHODS place the bin in their top-N), the family-level ranks ``agg_*`` and
+    ``consensus`` (the cross-family rule; see shared/rank_aggregation.py).
+    """
     screen = univariate_screen(Xc_log, cond_c)
     ridge = RidgeClassifier(alpha=1.0).fit(Xc_scaled, cond_c)
     scores = {
         'univariate': screen['screen_F'].to_numpy(),
         'vip': compute_vip_1comp(Xc_scaled, cond_c),
         'ridge': np.abs(np.atleast_2d(ridge.coef_)).mean(0),
+        'lr': fit_importance('lr', Xc_scaled, cond_c, seed=seed)['global'],
+        'svm': fit_importance('svm', Xc_scaled, cond_c, seed=seed)['global'],
     }
     per_seed = [RandomForestClassifier(n_estimators=500, random_state=seed + s)
                 .fit(Xc_scaled, cond_c).feature_importances_ for s in range(rf_seeds)]
     scores['rf'] = np.mean(per_seed, axis=0)
+    scores['gb'] = fit_importance('gb', Xc_scaled, cond_c, seed=seed)['global']
     half = max(1, rf_seeds // 2)
     rf_agreement = jaccard(top_set(np.mean(per_seed[:half], 0), top_n),
                            top_set(np.mean(per_seed[half:], 0), top_n)) if rf_seeds > 1 else np.nan
@@ -175,8 +198,19 @@ def rank_features(Xc_scaled, Xc_log, cond_c, top_n=50, min_rankers=2, rf_seeds=2
     table['n_rankers'] = table[[f'in_{m}_top' for m in VOTERS]].sum(axis=1)
     table['mean_voter_rank'] = table[[f'{m}_rank' for m in VOTERS]].mean(axis=1)
     table['candidate'] = table['n_rankers'] >= min_rankers
+    table['n_methods'] = table[[f'in_{m}_top' for m in METHODS]].sum(axis=1)
+    table = pd.concat([table, aggregate_ranks({m: scores[m] for m in METHODS}, top_k=top_n)], axis=1)
+    table['consensus'] = consensus_mask(table, consensus_rule, max_worst_rank, min_families)
     table = pd.concat([table, screen], axis=1)
     return table, {'rf_seed_agreement': rf_agreement, 'scores': scores}
+
+
+def selected_by(table):
+    """Why a bin is on the follow-up list: the colony-level screen with VIP, the
+    cross-family consensus of the six methods, or both ('' = not on the list)."""
+    c, k = table['candidate'].to_numpy(bool), table['consensus'].to_numpy(bool)
+    return np.select([c & k, c, k], ['screen + VIP and method consensus', 'screen + VIP',
+                                     'method consensus'], default='')
 
 
 def jaccard(a, b):

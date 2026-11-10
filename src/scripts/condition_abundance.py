@@ -7,6 +7,8 @@ colony-to-colony agreement is visible directly. Rows marked * are consistent
 across colonies: one condition's colonies all sit above (or all below) every
 colony of the other conditions.
 
+The main analysis draws this figure for every run. To redraw it on its own:
+
     python src/scripts/condition_abundance.py [experiment]
 """
 import os
@@ -33,14 +35,12 @@ def _row_scale(a):
     return (a - lo) / np.where(hi - lo == 0, 1, hi - lo)
 
 
-def main():
-    experiment, safe, folder = experiment_and_folder(config)
-    if folder is None:
-        return
+def figure(experiment, safe, folder):
+    """Draw the figure from results/<experiment>/candidates_<experiment>.csv."""
     df = pd.read_csv(os.path.join(folder, f'candidates_{safe}.csv'))
     if df.empty:
-        print("No candidates for this experiment.")
-        return
+        print("  No candidates for this experiment: no condition-abundance figure.")
+        return None
     df = df.sort_values('mean_voter_rank')
     mean_cols = [c for c in df.columns if c.startswith('mean_log10_')]
     col_cols = [c for c in df.columns if c.startswith('colony_log10_')]
@@ -69,7 +69,15 @@ def main():
     a2.set_title('Colony means, grouped by condition\n(row-scaled)', fontsize=10)
     fig.suptitle(f'{experiment} | candidates (* = consistent across colonies)', fontsize=11)
     fig.tight_layout()
-    pub_savefig(os.path.join(folder, f'condition_abundance_{safe}.png'))
+    out_path = os.path.join(folder, f'condition_abundance_{safe}.png')
+    pub_savefig(out_path)
+    return out_path
+
+
+def main():
+    experiment, safe, folder = experiment_and_folder(config)
+    if folder is not None:
+        figure(experiment, safe, folder)
 
 
 if __name__ == '__main__':

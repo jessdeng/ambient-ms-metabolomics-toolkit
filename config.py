@@ -16,7 +16,8 @@ import os as _os
 import json as _json
 
 # ── Data ────────────────────────────────────────────────────────────────────────
-EXPERIMENT = 'sample_experiment'      # folder name under data/
+EXPERIMENT = 'sample_experiment'      # folder name under data/, or 'all' for every
+                                      # experiment there (same as --all)
 METADATA_MANIFEST = 'metadata_manifest.csv'   # file -> class + colony; used if present
 EXPECTED_TECH_REPS = None             # e.g. 3: stop if a colony has another count
 
@@ -43,12 +44,32 @@ MIN_RANKERS = 2                       # candidate = top-N in >= this many of the
 RF_SEEDS = 25                         # random forest: sensitivity column, not a voter
 RANDOM_SEED = 42
 
+# ── Method comparison (six importance definitions) ──────────────────────────────
+# Component-1 VIP, Ridge, logistic regression, linear SVM, random forest and
+# gradient boosting each rank the bins; n_methods counts top-N memberships (0-6).
+# The count is descriptive (the three linear models are closely related), so the
+# follow-up list uses one vote per model family (linear, tree, PLS):
+CONSENSUS_RULE = 'n_families_topk'    # top-N in >= CONSENSUS_MIN_FAMILIES_TOPK families;
+                                      # or 'worst_family_rank' (<= CONSENSUS_MAX_WORST_FAMILY_RANK)
+CONSENSUS_MIN_FAMILIES_TOPK = 2
+CONSENSUS_MAX_WORST_FAMILY_RANK = 50
+MIN_METHODS_OVERLAP = 2               # feature_overlap table: top-N in >= this many methods
+
 # ── Classifier comparison (condition-plate discriminability) ────────────────────
 # Six models (RF, SVM, GB, LR, LDA, Ridge), default settings, folds that hold out
 # whole colonies. Produces classifier_comparison_<exp>.png and _accuracy_<exp>.csv.
 RUN_CLASSIFIERS = True
 CV_FOLDS = 5                          # reduced to the smallest colonies-per-condition
 N_CV_REPEATS = 10                     # repeats with different colony splits
+
+# ── Permutation test (could the accuracy arise with no real difference?) ────────
+# Condition labels are shuffled among colonies and the whole cross-validation is
+# repeated. The smallest attainable p-value is 1 / (N_PERMUTATIONS + 1).
+RUN_PERMUTATION = True
+N_PERMUTATIONS = 200
+PERMUTATION_MODELS = 'Random Forest, SVM, Logistic Regression, LDA, Ridge'
+                                      # Gradient Boosting is left out: about 20x slower
+N_JOBS = -1                           # parallel workers for the permutation test (-1 = all cores)
 
 # ── Descriptive outputs ─────────────────────────────────────────────────────────
 N_PCA_COMPONENTS = 5
@@ -57,24 +78,38 @@ SIGNAL_R_MIN = 0.9                    # adjacent-bin correlation to test for one
 
 
 # ── Load overrides from a JSON settings file ────────────────────────────────────
-_config_json_path = _os.environ.get('TOOLKIT_CONFIG') or _os.path.join(
-    _os.path.dirname(_os.path.abspath(__file__)), 'config.json')
-CONFIG_FILE = _os.path.abspath(_config_json_path)
-UNKNOWN_CONFIG_KEYS = []
-if _os.path.exists(_config_json_path):
-    with open(_config_json_path) as _f:
-        _overrides = _json.load(_f)
-    for _k, _v in _overrides.items():
-        if _k.startswith('_'):
+# Order: the file named by --config / TOOLKIT_CONFIG, else config.json and then,
+# if present, config.local.json (your own settings; ignored by Git).
+def _apply(path):
+    with open(path) as f:
+        overrides = _json.load(f)
+    unknown = []
+    for k, v in overrides.items():
+        if k.startswith('_'):
             continue
-        if _k in globals() and _k.isupper():
-            globals()[_k] = _v
+        if k in globals() and k.isupper():
+            globals()[k] = v
         else:
-            UNKNOWN_CONFIG_KEYS.append(_k)
-    if UNKNOWN_CONFIG_KEYS:
-        print(f"  [config] warning: unrecognised setting(s) ignored in {CONFIG_FILE}: "
-              f"{UNKNOWN_CONFIG_KEYS}")
-    del _f, _overrides
-elif _os.environ.get('TOOLKIT_CONFIG'):
-    raise FileNotFoundError(f"Configuration file not found: {_config_json_path}")
-del _config_json_path, _os, _json
+            unknown.append(k)
+    if unknown:
+        print(f"  [config] warning: unrecognised setting(s) ignored in {path}: {unknown}")
+    return unknown
+
+
+_here = _os.path.dirname(_os.path.abspath(__file__))
+UNKNOWN_CONFIG_KEYS = []
+if _os.environ.get('TOOLKIT_CONFIG'):
+    CONFIG_FILE = _os.path.abspath(_os.environ['TOOLKIT_CONFIG'])
+    if not _os.path.exists(CONFIG_FILE):
+        raise FileNotFoundError(f"Configuration file not found: {CONFIG_FILE}")
+    UNKNOWN_CONFIG_KEYS += _apply(CONFIG_FILE)
+else:
+    CONFIG_FILE = _os.path.join(_here, 'config.json')
+    if _os.path.exists(CONFIG_FILE):
+        UNKNOWN_CONFIG_KEYS += _apply(CONFIG_FILE)
+    _local = _os.path.join(_here, 'config.local.json')
+    if _os.path.exists(_local):
+        UNKNOWN_CONFIG_KEYS += _apply(_local)
+        CONFIG_FILE = _local
+    del _local
+del _here, _apply, _os, _json
