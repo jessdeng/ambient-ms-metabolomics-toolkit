@@ -14,7 +14,7 @@ import pandas as pd
 
 import config
 from scripts._common import experiment_and_folder, ROOT
-from standard.preprocessing import load_experiment, bin_features, filter_mass_range
+from standard.preprocessing import load_experiment, bin_spectra
 from shared.grouping import resolve_design
 from shared.visualization import plot_spectrum_with_features
 
@@ -30,8 +30,7 @@ def main():
     exp_dir = os.path.join(ROOT, 'data', experiment)
     X, names, mz = load_experiment(exp_dir)
     cond, _ = resolve_design(exp_dir, names, config.METADATA_MANIFEST)
-    Xb, mzb = bin_features(X, mz, config.BIN_WIDTH, config.BIN_LABELS)
-    Xb, mzb = filter_mass_range(Xb, mzb, config.MZ_MIN, config.MZ_MAX)
+    Xb, mzb = bin_spectra(X, mz, config.BIN_WIDTH, config.MZ_MIN, config.MZ_MAX, config.BIN_LABELS)
     out = os.path.join(folder, f'condition_spectrum_{safe}.html')
     plot_spectrum_with_features(Xb, mzb, cond, cand, experiment, out,
                                 high_mask=cand['colonies_consistent'].to_numpy(), interactive=True)

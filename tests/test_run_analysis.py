@@ -12,6 +12,7 @@ def test_demo_run_writes_the_expected_tables(tmp_path, monkeypatch):
     monkeypatch.setattr(run_analysis, '_ROOT', str(tmp_path))
     monkeypatch.setenv('TOOLKIT_EXPERIMENT', 'sample_experiment')
     monkeypatch.setattr(run_analysis.config, 'RF_SEEDS', 2)
+    monkeypatch.setattr(run_analysis.config, 'GB_SEEDS', 2)
     monkeypatch.setattr(run_analysis.config, 'N_CV_REPEATS', 1)
     monkeypatch.setattr(run_analysis.config, 'N_PERMUTATIONS', 9)
     monkeypatch.setattr(run_analysis.config, 'N_JOBS', 1)
@@ -34,6 +35,9 @@ def test_demo_run_writes_the_expected_tables(tmp_path, monkeypatch):
     assert {'n_methods', 'consensus', 'selected_by', 'agg_worst_family_rank', 'in_svm_top',
             'in_lr_top', 'in_gb_top', 'mean_margin'} <= set(ranks.columns)
     assert ranks.n_methods.between(0, 6).all()
+    for m in ('vip', 'ridge', 'lr', 'svm', 'rf', 'gb'):                # no top list is padded
+        assert (ranks.loc[ranks[f'in_{m}_top'], f'{m}_score'] > 0).all(), m
+    assert ranks.in_gb_top.sum() < 50 and 'fewer than 50 bins have a non-zero score' in summary
     assert len(cand) == (ranks.candidate | ranks.consensus).sum()
     assert {'apex_mz', 'baseline_share', 'related_ions'} <= set(cand.columns)
     overlap = pd.read_csv(out / 'feature_overlap_sample_experiment.csv')
@@ -50,7 +54,8 @@ def test_all_experiments_writes_the_cross_experiment_outputs(tmp_path, monkeypat
     from standard import run_analysis
     monkeypatch.setattr(run_analysis, '_ROOT', str(tmp_path))
     monkeypatch.setenv('TOOLKIT_EXPERIMENT', 'all')
-    for key, value in (('RF_SEEDS', 2), ('N_CV_REPEATS', 1), ('RUN_PERMUTATION', False)):
+    for key, value in (('RF_SEEDS', 2), ('GB_SEEDS', 2), ('N_JOBS', 1), ('N_CV_REPEATS', 1),
+                       ('RUN_PERMUTATION', False)):
         monkeypatch.setattr(run_analysis.config, key, value)
     assert run_analysis._experiments() == ['exp_a', 'exp_b']          # the bundled demo is skipped
     run_analysis.main()

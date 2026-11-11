@@ -25,7 +25,8 @@ EXPECTED_TECH_REPS = None             # e.g. 3: stop if a colony has another cou
 MZ_MIN = 100                          # Da
 MZ_MAX = 2000                         # Da
 BIN_WIDTH = 0.5                       # Da; unit-resolution QqQ, absorbs m/z drift
-BIN_LABELS = 'mean_mz'                # 'mean_mz' (where the signal sits) or
+BIN_LABELS = 'mean_mz'                # 'mean_mz' (mean m/z of the bin's points),
+                                      # 'centroid' (intensity-weighted mean m/z) or
                                       # 'lower_edge' (MetaboAnalyst's labels)
 
 # ── Feature filters (label-free; MetaboAnalyst defaults) ─────────────────────────
@@ -36,12 +37,18 @@ ABUNDANCE_PERCENTILE = 5              # drop the lowest-mean X% of bins (0 = off
 # Spectra are always TIC-normalised and log10-transformed. 'autoscale' weights
 # every bin equally (MetaboAnalyst default); 'pareto' keeps some intensity weight.
 SCALING = 'autoscale'
+LOG_OFFSET = 'global'                 # value added before log10 so zeros stay finite:
+                                      # 'global' (half the smallest positive value) or
+                                      # 'per_bin' (half each bin's own smallest positive value)
 
 # ── Prioritisation ──────────────────────────────────────────────────────────────
 TOP_N_FEATURES = 50                   # top-N of each ranker
 MIN_RANKERS = 2                       # candidate = top-N in >= this many of the two
                                       # voting rankers (univariate F, component-1 VIP)
-RF_SEEDS = 25                         # random forest: sensitivity column, not a voter
+RF_SEEDS = 100                        # seeds averaged for the random-forest importance
+GB_SEEDS = 100                        # ... and for the gradient-boosting importance. Both
+                                      # break ties between equal splits at random; fewer
+                                      # seeds are faster but the top-N lists move more
 RANDOM_SEED = 42
 
 # ── Method comparison (six importance definitions) ──────────────────────────────
@@ -69,7 +76,8 @@ RUN_PERMUTATION = True
 N_PERMUTATIONS = 200
 PERMUTATION_MODELS = 'Random Forest, SVM, Logistic Regression, LDA, Ridge'
                                       # Gradient Boosting is left out: about 20x slower
-N_JOBS = -1                           # parallel workers for the permutation test (-1 = all cores)
+N_JOBS = -1                           # parallel workers for the seed-averaged importances and
+                                      # the permutation test (-1 = all cores)
 
 # ── Descriptive outputs ─────────────────────────────────────────────────────────
 N_PCA_COMPONENTS = 5

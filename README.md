@@ -48,10 +48,10 @@ Then fix `class` and `colony` for any file named inconsistently (e.g. `AmbB5T1` 
 
 ## What the analysis does
 
-1. **Spectra → bins.** All instrument points are summed into 0.5-Da bins on a fixed grid (absorbs unit-resolution m/z drift).
+1. **Spectra → bins.** All instrument points are summed into 0.5-Da bins on a fixed grid that starts at `MZ_MIN` (absorbs unit-resolution m/z drift). Only bins that lie entirely inside `MZ_MIN`–`MZ_MAX` are kept, so every bin spans the same width.
 2. **TIC normalisation.** Each spectrum is divided by its own total ion current over all bins in range. This corrects spray-to-spray differences in sampled material.
 3. **Filters.** Label-free MetaboAnalyst defaults: the lowest 25 % of bins by relative SD and the lowest 5 % by mean intensity are dropped.
-4. **log10.** Spray noise is multiplicative.
+4. **log10.** Spray noise is multiplicative. Zeros get an offset of half the smallest positive value (`LOG_OFFSET`: of the whole matrix, or of each bin).
 5. **Overview.** PCA on the spectra. For each component, the share of score variance that is condition-plate, colony or technical.
 6. **Colony means.** Technical replicates are averaged on the log scale. All rankings use one row per colony.
 7. **Rankers that vote** (top-N each, default 50):
@@ -70,12 +70,12 @@ Then fix `class` and `colony` for any file named inconsistently (e.g. `AmbB5T1` 
    | Logistic regression | mean \|coefficient\| | linear |
    | Linear SVM | mean \|weight\| over the class pairs | linear |
    | Random forest | mean impurity importance over `RF_SEEDS` seeds | tree |
-   | Gradient boosting | split gain | tree |
+   | Gradient boosting | mean split gain over `GB_SEEDS` seeds | tree |
 
-   - **`n_methods`** counts how many of the six place a bin in their top-N. It is descriptive: the three linear models are closely related, so their votes are not independent.
+   - **`n_methods`** counts how many of the six place a bin in their top-N. It is descriptive: the three linear models are closely related, so their votes are not independent. A method's top-N holds only bins it gave a non-zero score, so it can be shorter than N (gradient boosting on a small design); the run prints a note when that happens.
    - **Cross-family consensus** gives each family one vote. By default a bin qualifies when it is top-N in at least two of the three families.
    - **Figures:** the method intersections and the top features by consensus (`corroboration_<exp>.png`), and the pairwise agreement of all seven rankings (`ranker_agreement_<exp>.png`).
-   - **Reading it:** with 15 colonies and about 2,700 bins, Ridge's top-50 is set by its penalty and the forest's top-50 changes with the random seed (seed-to-seed agreement 0.23–0.47, printed in every run). Agreement between methods is a reason to look at a feature, not proof.
+   - **Reading it:** with 15 colonies and about 2,700 bins, Ridge's top-50 is set by its penalty and the tree ensembles break ties between equally good splits at random, so their top-50 lists change with the seed. Both are therefore averaged over 100 seeds; even then the two halves of the seeds agree only in part (top-50 Jaccard 0.47–0.64 for the random forest and 0.47–0.85 for gradient boosting on the datasets this was developed on; printed in every run). Agreement between methods is a reason to look at a feature, not proof.
 9. **Follow-up list.** A bin is on the list if it is top-N in both voting rankers, or if it meets the cross-family consensus. The column `selected_by` says which.
 10. **Evidence for each bin:**
    - share of variance that is condition-plate / colony / technical;
@@ -98,15 +98,16 @@ All settings and their defaults are in [config.py](config.py). Override them in 
 | `EXPERIMENT` | `sample_experiment` | folder under `data/` (or `--experiment`); `all` runs every experiment (or `--all`) |
 | `METADATA_MANIFEST`, `EXPECTED_TECH_REPS` | `metadata_manifest.csv`, none | design file; replicate-count check |
 | `MZ_MIN`, `MZ_MAX`, `BIN_WIDTH` | 100, 2000, 0.5 | m/z range and bin width (Da) |
-| `BIN_LABELS` | `mean_mz` | bin label: mean m/z of its points, or `lower_edge` (MetaboAnalyst) |
+| `BIN_LABELS` | `mean_mz` | bin label: mean m/z of its points, `centroid` (intensity-weighted mean m/z), or `lower_edge` (MetaboAnalyst) |
 | `VARIANCE_PERCENTILE`, `ABUNDANCE_PERCENTILE` | 25, 5 | label-free filters |
 | `SCALING` | `autoscale` | for the multivariate rankers; or `pareto` |
+| `LOG_OFFSET` | `global` | offset added before log10: half the smallest positive value of the matrix, or `per_bin` (of each bin) |
 | `TOP_N_FEATURES`, `MIN_RANKERS` | 50, 2 | top-N of every ranking; voters a bin must be top-N in |
-| `RF_SEEDS`, `RANDOM_SEED` | 25, 42 | random-forest seeds averaged; seed for everything |
+| `RF_SEEDS`, `GB_SEEDS`, `RANDOM_SEED` | 100, 100, 42 | seeds averaged for the random-forest and gradient-boosting importances; seed for everything |
 | `CONSENSUS_RULE`, `CONSENSUS_MIN_FAMILIES_TOPK`, `CONSENSUS_MAX_WORST_FAMILY_RANK` | `n_families_topk`, 2, 50 | cross-family consensus: top-N in at least this many families, or (`worst_family_rank`) ranked this well in every family |
 | `MIN_METHODS_OVERLAP` | 2 | `feature_overlap` table: bins in the top-N of at least this many methods |
 | `RUN_CLASSIFIERS`, `CV_FOLDS`, `N_CV_REPEATS` | true, 5, 10 | classifier comparison; folds reduced to the smallest colonies-per-condition |
-| `RUN_PERMUTATION`, `N_PERMUTATIONS`, `PERMUTATION_MODELS`, `N_JOBS` | true, 200, all but Gradient Boosting, -1 | permutation test; models as a comma-separated list; parallel workers (-1 = all cores) |
+| `RUN_PERMUTATION`, `N_PERMUTATIONS`, `PERMUTATION_MODELS`, `N_JOBS` | true, 200, all but Gradient Boosting, -1 | permutation test; models as a comma-separated list; parallel workers for it and for the seed-averaged importances (-1 = all cores) |
 | `N_PCA_COMPONENTS`, `N_TOP_VIP`, `SIGNAL_R_MIN` | 5, 30, 0.9 | descriptive outputs |
 
 ## Outputs (`results/<experiment>/`)

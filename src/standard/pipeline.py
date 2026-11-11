@@ -4,9 +4,13 @@ PLS-DA Variable Importance in Projection (VIP).
 VIP_j = sqrt( p * sum_a (w_aj/||w_a||)^2 SS_a / sum_a SS_a ),  SS_a = ||t_a||^2 ||q_a||^2
 
 With one component this is MetaboAnalyst's "Comp. 1" VIP (validated against
-MetaboAnalyst: max difference 5e-5 across 2,707 features). The multi-component
-form matches ropls and mixOmics (tests/test_vip_validation.py).
+MetaboAnalyst: max difference 5e-5 across 2,707 features). It reduces to
+sqrt(p) |w_1j| / ||w_1|| and is computed in closed form (compute_vip_1comp), so
+it does not depend on a NIPALS tolerance. The multi-component form matches ropls
+and mixOmics (tests/test_vip_validation.py).
 """
+
+import warnings
 
 import numpy as np
 import matplotlib
@@ -38,9 +42,25 @@ def compute_vip(X, y_labels, n_components=1, tol=None, max_iter=None):
     return np.sqrt(X.shape[1] * (W_norm ** 2 @ SS) / SS.sum())
 
 
-def compute_vip_1comp(X, y_labels, tol=None, max_iter=None):
-    """Component-1 VIP (MetaboAnalyst 'Comp. 1')."""
-    return compute_vip(X, y_labels, n_components=1, tol=tol, max_iter=max_iter)
+def compute_vip_1comp(X, y_labels):
+    """Component-1 VIP (MetaboAnalyst 'Comp. 1') in closed form.
+
+    w_1 is the leading left singular vector of Xc' Yc (the vector NIPALS
+    converges to), so VIP_j = sqrt(p) |w_1j|. No iteration: no tolerance, no
+    starting vector. Agrees with compute_vip(..., n_components=1) at the
+    validated NIPALS settings to < 1e-6."""
+    X = np.asarray(X, float)
+    classes, yi = np.unique(np.asarray(y_labels), return_inverse=True)
+    if classes.size < 2:
+        raise ValueError("VIP needs at least two classes")
+    Y = np.eye(classes.size)[yi]
+    U, s, _ = np.linalg.svd((X - X.mean(axis=0)).T @ (Y - Y.mean(axis=0)), full_matrices=False)
+    if s[0] <= 0:
+        raise ValueError("X has no covariance with the class labels")
+    if s.size > 1 and s[1] > (1 - 1e-6) * s[0]:
+        warnings.warn("The first two PLS directions are not separable: the component-1 VIP "
+                      "is not unique.", stacklevel=2)
+    return np.sqrt(X.shape[1]) * np.abs(U[:, 0])
 
 
 def plot_vip(vip, mz, X_means, groups, n_top, experiment_name, out_path):

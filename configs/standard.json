@@ -10,8 +10,10 @@
   "VARIANCE_PERCENTILE": 25,
   "ABUNDANCE_PERCENTILE": 5,
   "SCALING": "autoscale",
+  "LOG_OFFSET": "global",
   "TOP_N_FEATURES": 50,
   "MIN_RANKERS": 2,
-  "RF_SEEDS": 25,
+  "RF_SEEDS": 100,
+  "GB_SEEDS": 100,
   "RANDOM_SEED": 42
 }

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.ranking import (colony_means, univariate_screen, colony_consistency, variance_partition,
                             technical_cv, rank_features, concordance, benjamini_hochberg, top_set,
+                            ties_at_cutoff,
                             selected_by, VOTERS, METHODS)
 from shared.pca import nested_variance_components
 
@@ -39,27 +40,37 @@ def test_voters_find_the_planted_bins_and_sensitivity_does_not_vote():
     X = _data(1, effect=1.0)                                       # 10x
     Xc, _, cc = colony_means(X, COL, COND)
     Xs = (Xc - Xc.mean(0)) / Xc.std(0, ddof=1)
-    table, info = rank_features(Xs, Xc, cc, top_n=10, min_rankers=2, rf_seeds=4, seed=0)
+    table, info = rank_features(Xs, Xc, cc, top_n=10, min_rankers=2, rf_seeds=4, gb_seeds=4, seed=0)
     assert table.loc[:4, 'candidate'].all()
     assert set(VOTERS) == {'univariate', 'vip'}
     assert table['n_rankers'].max() == 2                           # ridge / rf never vote
     assert 0 <= info['rf_seed_agreement'] <= 1
+    assert 0 <= info['gb_seed_agreement'] <= 1
+    again, info2 = rank_features(Xs, Xc, cc, top_n=10, min_rankers=2, rf_seeds=4, gb_seeds=4, seed=0,
+                                 n_jobs=2)
+    for m in ('rf', 'gb'):                                         # same result however it is run
+        np.testing.assert_array_equal(info['scores'][m], info2['scores'][m])
+    one, info1 = rank_features(Xs, Xc, cc, top_n=10, rf_seeds=1, gb_seeds=1, seed=0)
+    assert np.isnan(info1['rf_seed_agreement']) and np.isnan(info1['gb_seed_agreement'])
 
 
 def test_method_comparison_counts_votes_and_families():
     X = _data(1, effect=1.0)
     Xc, _, cc = colony_means(X, COL, COND)
     Xs = (Xc - Xc.mean(0)) / Xc.std(0, ddof=1)
-    table, info = rank_features(Xs, Xc, cc, top_n=10, rf_seeds=2, seed=0)
+    table, info = rank_features(Xs, Xc, cc, top_n=10, rf_seeds=2, gb_seeds=2, seed=0)
     assert list(info['scores']) == ['univariate', 'vip', 'ridge', 'lr', 'svm', 'rf', 'gb']
     cols = [f'in_{m}_top' for m in METHODS]
     assert (table['n_methods'] == table[cols].sum(axis=1)).all() and table['n_methods'].max() <= 6
     assert all(table[c].sum() == 10 for c in cols)                 # top-N of every method
+    assert info['top_size'] == {m: 10 for m in info['scores']}
+    assert all(k >= 1 for k in info['ties_at_cutoff'].values())
+    assert all((table.loc[table[f'in_{m}_top'], f'{m}_score'] > 0).all() for m in info['scores'])
     assert (table['consensus'] == (table['agg_n_families_topk'] >= 2)).all()
     assert table.loc[:4, 'n_methods'].min() >= 1 and table.loc[:4, 'n_methods'].mean() >= 2
     assert (table.loc[:4, 'top_condition_mean'] == 'E').all()
     assert table.loc[:4, 'mean_margin'].min() > 5                  # planted 10x over the rest
-    strict, _ = rank_features(Xs, Xc, cc, top_n=10, rf_seeds=2, seed=0,
+    strict, _ = rank_features(Xs, Xc, cc, top_n=10, rf_seeds=2, gb_seeds=2, seed=0,
                               consensus_rule='worst_family_rank', max_worst_rank=10)
     assert (strict['consensus'] == (strict['agg_worst_family_rank'] <= 10)).all()
     by = selected_by(table)
@@ -102,5 +113,10 @@ def test_concordance_and_helpers():
     assert t.loc[('a', 'b'), 'jaccard'] == 1.0 and t.loc[('a', 'c'), 'jaccard'] == 0.0
     assert 0 < t.chance.iloc[0] < 0.1
     assert top_set(np.array([1, 3, 3, 0]), 1) == {1}               # tie -> lower index
+    sparse = np.array([0, 0, .3, 0, .1, .1, np.nan])
+    assert top_set(sparse, 5) == {2, 4, 5}                         # never padded with unused features
+    assert top_set(np.zeros(4), 2) == set()
+    assert ties_at_cutoff(sparse, 5) == 2 and ties_at_cutoff(sparse, 1) == 1
+    assert ties_at_cutoff(np.zeros(4), 2) == 0
     p = np.array([0.01, 0.04, 0.03, 0.5])
     np.testing.assert_allclose(benjamini_hochberg(p), [0.04, 0.16 / 3, 0.16 / 3, 0.5])

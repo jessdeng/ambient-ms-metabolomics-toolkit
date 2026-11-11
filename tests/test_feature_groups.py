@@ -3,7 +3,7 @@ import os, sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from standard.preprocessing import bin_features
+from standard.preprocessing import bin_spectra
 from shared.feature_groups import build_signal_groups, aggregate_to_groups, flag_relations
 
 RAW_MZ = np.round(np.arange(150.0, 170.0001, 0.1), 1)
@@ -41,7 +41,7 @@ def test_split_peak_is_merged_and_isotope_is_flagged_not_merged():
         return (_peak(160.0, 1e5 * a * rng.lognormal(0, 0.05)) +      # split across 160.0 edge
                 _peak(161.0, 1.2e4 * a * rng.lognormal(0, 0.05)))     # +1 isotopologue
     raw, _ = _spectra(make)
-    Xb, mzb = bin_features(raw, RAW_MZ, 0.5)
+    Xb, mzb = bin_spectra(raw, RAW_MZ, 0.5, 150.0, 170.0)
     m, pairs = build_signal_groups(Xb, mzb, raw, RAW_MZ, GROUPS, mz0=150.0)
     assert _decision(pairs, 159.75) == 'merged'
     g = m.loc[(m.mz_bin > 159.6) & (m.mz_bin < 160.3), 'signal_group'].unique()
@@ -61,7 +61,7 @@ def test_drifting_covarying_pair_is_not_merged():
     def make(rng, a):
         return _peak(160.0 + rng.uniform(-0.2, 0.2), 1e5 * a ** 3)
     raw, _ = _spectra(make, seed=1)
-    Xb, mzb = bin_features(raw, RAW_MZ, 0.5)
+    Xb, mzb = bin_spectra(raw, RAW_MZ, 0.5, 150.0, 170.0)
     m, pairs = build_signal_groups(Xb, mzb, raw, RAW_MZ, GROUPS, mz0=150.0)
     assert _decision(pairs, 159.75) == 'co-varying, unresolved'
     g = m.loc[(m.mz_bin > 159.6) & (m.mz_bin < 160.3), 'signal_group'].unique()
@@ -72,6 +72,6 @@ def test_independent_neighbours_are_not_candidates():
     def make(rng, a):
         return _peak(159.6, 1e5 * rng.lognormal(0, 0.8)) + _peak(160.4, 1e5 * rng.lognormal(0, 0.8))
     raw, _ = _spectra(make, seed=2)
-    Xb, mzb = bin_features(raw, RAW_MZ, 0.5)
+    Xb, mzb = bin_spectra(raw, RAW_MZ, 0.5, 150.0, 170.0)
     _, pairs = build_signal_groups(Xb, mzb, raw, RAW_MZ, GROUPS, mz0=150.0)
     assert _decision(pairs, 159.75) is None

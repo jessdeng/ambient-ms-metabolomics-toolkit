@@ -168,7 +168,8 @@ def run_experiment(experiment):
     # -- 2. spectra -> features -------------------------------------------------
     progress.stage(f"Features: {config.BIN_WIDTH}-Da bins, TIC normalisation, filters, log10")
     M = build_matrices(X_raw, raw_mz, config.BIN_WIDTH, config.BIN_LABELS, config.MZ_MIN,
-                       config.MZ_MAX, config.VARIANCE_PERCENTILE, config.ABUNDANCE_PERCENTILE)
+                       config.MZ_MAX, config.VARIANCE_PERCENTILE, config.ABUNDANCE_PERCENTILE,
+                       config.LOG_OFFSET)
     mz = M['mz']
     print(f"  {M['binned'].shape[1]} bins in {config.MZ_MIN}-{config.MZ_MAX} Da; "
           f"{mz.size} after the variance/abundance filters")
@@ -190,7 +191,8 @@ def run_experiment(experiment):
     table, info = rank_features(scale(Xc, config.SCALING), Xc, cond_c, n_top, config.MIN_RANKERS,
                                 config.RF_SEEDS, seed, config.CONSENSUS_RULE,
                                 config.CONSENSUS_MAX_WORST_FAMILY_RANK,
-                                config.CONSENSUS_MIN_FAMILIES_TOPK)
+                                config.CONSENSUS_MIN_FAMILIES_TOPK,
+                                gb_seeds=config.GB_SEEDS, n_jobs=config.N_JOBS)
     table.insert(0, 'mz', mz)
     table = pd.concat([table,
                        colony_consistency(Xc, cond_c, table['top_condition'].to_numpy(),
@@ -200,7 +202,7 @@ def run_experiment(experiment):
 
     smap, spairs = build_signal_groups(M['binned'], M['mz_binned'], X_raw, raw_mz, colony,
                                        bin_width=config.BIN_WIDTH,
-                                       mz0=float(np.floor(raw_mz.min() / config.BIN_WIDTH + 1e-9) * config.BIN_WIDTH),
+                                       mz0=float(config.MZ_MIN),
                                        r_min=config.SIGNAL_R_MIN)
     sig = smap.set_index('mz_bin').reindex(mz)
     table['signal_group'] = sig['signal_group'].to_numpy()
@@ -211,9 +213,24 @@ def run_experiment(experiment):
     table = table.sort_values(['n_rankers', 'mean_voter_rank'], ascending=[False, True])
     table.to_csv(os.path.join(out, f'feature_rankings_{safe}.csv'), index=False)
     smap.to_csv(os.path.join(out, f'signal_groups_{safe}.csv'), index=False)
-    print(f"  top-{n_top} of each ranking recorded for {mz.size} bins; "
-          f"random forest seed-to-seed agreement {info['rf_seed_agreement']:.2f}")
-    report['rf_seed_agreement'] = info['rf_seed_agreement']
+    print(f"  top-{n_top} of each ranking recorded for {mz.size} bins")
+    print(f"  seed-to-seed agreement of the top-{n_top} (Jaccard, two halves of the seeds): "
+          f"random forest {info['rf_seed_agreement']:.2f} ({config.RF_SEEDS} seeds), "
+          f"gradient boosting {info['gb_seed_agreement']:.2f} ({config.GB_SEEDS} seeds)")
+    report.update(rf_seed_agreement=info['rf_seed_agreement'],
+                  gb_seed_agreement=info['gb_seed_agreement'])
+    short = {RANKER_NAMES[m]: k for m, k in info['top_size'].items() if k < n_top}
+    tied = {RANKER_NAMES[m]: k for m, k in info['ties_at_cutoff'].items() if k > 1}
+    notes = []
+    if short:
+        notes.append(f"fewer than {n_top} bins have a non-zero score for {short}; those top "
+                     "lists hold only the bins the method used")
+    if tied:
+        notes.append(f"the top-{n_top} cut falls among tied scores for {tied} (number of bins "
+                     "tied); ties go to the lower m/z")
+    for note in notes:
+        print(f"  NOTE: {note}")
+    report['notes'] += notes
 
     # -- 5. do the methods prioritise the same features? --------------------------
     progress.stage("Method comparison: do the rankings prioritise the same features?")
@@ -279,7 +296,8 @@ def run_experiment(experiment):
         folds, acc = compare_classifiers(
             X_tic, cond, colony, config.CV_FOLDS, config.N_CV_REPEATS, seed, config.SCALING,
             config.VARIANCE_PERCENTILE, config.ABUNDANCE_PERCENTILE,
-            progress=lambda r, n: print(f"  repeat {r}/{n}", flush=True))
+            progress=lambda r, n: print(f"  repeat {r}/{n}", flush=True),
+            log_offset=config.LOG_OFFSET)
         acc.to_csv(os.path.join(out, f'classifier_accuracy_{safe}.csv'), index=False)
         plot_accuracy_comparison(folds, experiment, os.path.join(out, f'classifier_comparison_{safe}.png'),
                                  chance=1.0 / len(np.unique(cond)))
@@ -303,7 +321,8 @@ def run_experiment(experiment):
                 MODELS[name](seed), X_tic, cond, colony, cv, n_permutations=config.N_PERMUTATIONS,
                 seed=seed, n_jobs=config.N_JOBS, scaling=config.SCALING,
                 variance_percentile=config.VARIANCE_PERCENTILE,
-                abundance_percentile=config.ABUNDANCE_PERCENTILE)
+                abundance_percentile=config.ABUNDANCE_PERCENTILE,
+                log_offset=config.LOG_OFFSET)
             rows.append(dict(model=name, observed_accuracy=obs, null_mean=null.mean(),
                              null_95th_percentile=np.percentile(null, 95), null_max=null.max(),
                              p_value=p, n_permutations=config.N_PERMUTATIONS,
@@ -317,7 +336,8 @@ def run_experiment(experiment):
     # -- 9. report -------------------------------------------------------------------
     progress.stage("Report: summary and run manifest")
     write_run_manifest(out, _ROOT, config, exp_dir,
-                       extra={'rf_seed_agreement_topN': info['rf_seed_agreement']})
+                       extra={'rf_seed_agreement_topN': info['rf_seed_agreement'],
+                              'gb_seed_agreement_topN': info['gb_seed_agreement']})
     report['seconds'] = time.time() - t0
     path = write_summary(report)
     print(f"  Saved -> {path}")
@@ -343,7 +363,8 @@ def write_summary(rep):
     L += ["", "-- Settings " + "-" * 60,
           f"  Bins {config.BIN_WIDTH} Da over m/z {config.MZ_MIN}-{config.MZ_MAX}; filters: lowest "
           f"{config.VARIANCE_PERCENTILE}% by RSD, lowest {config.ABUNDANCE_PERCENTILE}% by mean",
-          f"  TIC normalisation, log10, {config.SCALING}; top-N = {n_top}; seed {config.RANDOM_SEED}",
+          f"  TIC normalisation, log10 ({config.LOG_OFFSET} zero offset), {config.SCALING}; "
+          f"top-N = {n_top}; seed {config.RANDOM_SEED}",
           f"  Features: {rep['n_bins']} bins, {rep['n_features']} after the filters",
           "", "-- Structure of the data " + "-" * 47, f"  PCA: {rep['pca']}",
           "", "-- Method comparison " + "-" * 51,
@@ -353,7 +374,9 @@ def write_summary(rep):
     for r in conc.itertuples():
         L.append(f"    {RANKER_NAMES[r.ranker_a]:<20} vs {RANKER_NAMES[r.ranker_b]:<20} {r.shared:>3}"
                  f"   (Jaccard {r.jaccard:.2f})")
-    L.append(f"  Random forest seed-to-seed agreement (top-{n_top} Jaccard): {rep['rf_seed_agreement']:.2f}")
+    L.append(f"  Seed-to-seed agreement (top-{n_top} Jaccard between two halves of the seeds): "
+             f"random forest {rep['rf_seed_agreement']:.2f} ({config.RF_SEEDS} seeds), "
+             f"gradient boosting {rep['gb_seed_agreement']:.2f} ({config.GB_SEEDS} seeds)")
     L.append(f"  Bins in the top-{n_top} of k of the six methods ({', '.join(METHODS)}):")
     L.append("    " + ', '.join(f"k={int(k)}: {int(v)}" for k, v in rep['votes'].items()))
     L.append(f"  {rep['consensus_rule']}: {rep['n_consensus']} bins")

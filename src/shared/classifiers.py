@@ -27,7 +27,7 @@ from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.metrics import accuracy_score, balanced_accuracy_score
 from sklearn.svm import SVC
 
-from standard.preprocessing import feature_filter_mask
+from standard.preprocessing import FoldPreprocessor
 from shared.plot_style import apply_style, pub_savefig
 
 apply_style()
@@ -43,23 +43,17 @@ MODELS = {
 }
 
 
-def _fold_matrices(X_tic, tr, te, scaling, variance_percentile, abundance_percentile):
+def _fold_matrices(X_tic, tr, te, scaling, variance_percentile, abundance_percentile,
+                   log_offset='global'):
     """Filters, log10 offset and scaling fitted on the training rows only."""
-    keep = feature_filter_mask(X_tic[tr], variance_percentile, abundance_percentile)
-    Xtr, Xte = X_tic[tr][:, keep], X_tic[te][:, keep]
-    pos = Xtr[Xtr > 0]
-    off = pos.min() / 2 if pos.size else 1e-12
-    Ltr, Lte = np.log10(Xtr + off), np.log10(Xte + off)
-    mu, sd = Ltr.mean(0), Ltr.std(0, ddof=1)
-    sd = np.where(sd > 0, sd, 1.0)
-    if scaling == 'pareto':
-        sd = np.sqrt(sd)
-    return (Ltr - mu) / sd, (Lte - mu) / sd
+    prep = FoldPreprocessor(variance_percentile, abundance_percentile, scaling,
+                            log_offset).fit(X_tic[tr])
+    return prep.transform(X_tic[tr]), prep.transform(X_tic[te])
 
 
 def compare_classifiers(X_tic, condition, colony_id, n_splits=5, n_repeats=10, seed=42,
                         scaling='autoscale', variance_percentile=25, abundance_percentile=5,
-                        progress=None):
+                        progress=None, log_offset='global'):
     """Colony-grouped, repeated CV of the six models on TIC-normalised spectra.
 
     ``n_splits`` is reduced to the smallest number of colonies in any condition,
@@ -77,7 +71,8 @@ def compare_classifiers(X_tic, condition, colony_id, n_splits=5, n_repeats=10, s
     for i, (tr, te) in enumerate(cv.split(X_tic, y, g)):
         r, f = divmod(i, k)
         assert not set(g[tr]) & set(g[te]), "a colony is in both training and test"
-        Xtr, Xte = _fold_matrices(X_tic, tr, te, scaling, variance_percentile, abundance_percentile)
+        Xtr, Xte = _fold_matrices(X_tic, tr, te, scaling, variance_percentile, abundance_percentile,
+                                  log_offset)
         for name, make in MODELS.items():
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', message='Variables are collinear')  # LDA, p >> n

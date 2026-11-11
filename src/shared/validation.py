@@ -116,7 +116,7 @@ def colony_vote(y_pred, colony_id):
 
 
 def grouped_cv(estimator, X_tic, condition, colony_id, cv=None, scaling='autoscale',
-               variance_percentile=25, abundance_percentile=5):
+               variance_percentile=25, abundance_percentile=5, log_offset='global'):
     """Colony-grouped cross-validation of one model on TIC-normalised spectra.
 
     ``estimator`` is an unfitted scikit-learn classifier (cloned for every fold);
@@ -138,7 +138,7 @@ def grouped_cv(estimator, X_tic, condition, colony_id, cv=None, scaling='autosca
             if set(g[tr]) & set(g[te]):
                 raise ValueError("a colony is in both training and test")
             Xtr, Xte = _fold_matrices(X_tic, tr, te, scaling, variance_percentile,
-                                      abundance_percentile)
+                                      abundance_percentile, log_offset)
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', message='Variables are collinear')  # LDA, p >> n
                 pred[te] = clone(estimator).fit(Xtr, y[tr]).predict(Xte)

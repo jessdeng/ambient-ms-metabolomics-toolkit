@@ -2,22 +2,30 @@
 Spectra → feature matrix, in the order the physics of ambient MS suggests.
 
 1. load      every file's (m/z, intensity) profile; the instrument grid is kept
-2. bin       sum all points into fixed-width m/z bins (unit-resolution QqQ)
-3. range     keep MZ_MIN..MZ_MAX
-4. TIC       divide each spectrum by its own total ion current over ALL bins in
+2. bin       sum all points into fixed-width m/z bins that lie entirely inside
+             MZ_MIN..MZ_MAX (unit-resolution QqQ)
+3. TIC       divide each spectrum by its own total ion current over ALL bins in
              range — corrects spray-to-spray differences in how much material
              was sampled. Per-spectrum, so no information is shared between
              samples.
-5. filter    drop low-RSD and low-abundance bins (label-free)
-6. log10     with a half-minimum offset for zeros (spray noise is multiplicative)
+4. filter    drop low-RSD and low-abundance bins (label-free)
+5. log10     with a half-minimum offset for zeros (spray noise is multiplicative)
 
 Scaling (autoscale / Pareto) is applied later, to the colony-level matrix the
-multivariate rankers use.
+multivariate rankers use. Inside cross-validation, steps 4-5 and the scaling are
+fitted on the training spectra only (FoldPreprocessor).
 """
 
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass, field
+
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike, NDArray
+
+FloatArray = NDArray[np.float64]
 
 _METADATA_FILENAMES = {'metadata_manifest.csv'}
 
@@ -91,38 +99,57 @@ def validate_spectra(X, mz, names=None):
         raise ValueError(f"empty spectra: {who(empty)}")
 
 
-def bin_features(X, mz, bin_width=0.5, labels='mean_mz'):
-    """Sum intensities into fixed-width bins on a grid aligned to multiples of
-    ``bin_width`` (so bins are comparable across experiments).
+def bin_spectra(X: ArrayLike, mz: ArrayLike, bin_width: float = 0.5, mz_min: float = 100.0,
+                mz_max: float = 2000.0, labels: str = 'mean_mz') -> tuple[FloatArray, FloatArray]:
+    """Sum profile points into the half-open bins [mz_min + k*w, mz_min + (k+1)*w).
 
-    labels='mean_mz'   : each bin is labelled with the mean m/z of the points in it
-    labels='lower_edge': each bin is labelled with its lower edge (MetaboAnalyst)
-    Empty bins are dropped. Returns (X_binned, mz_binned).
+    Only bins that lie entirely inside [mz_min, mz_max) exist, so every bin spans
+    the same width (no part-filled bin at either limit) and the grid is the same
+    for every experiment run with the same settings. Bins that hold no
+    instrument point, or no intensity in any spectrum, are dropped.
+
+    labels='mean_mz'   : mean m/z of the instrument points in the bin
+    labels='centroid'  : intensity-weighted mean m/z of the summed signal
+    labels='lower_edge': the bin's lower edge (MetaboAnalyst)
+    Returns (X_binned, mz_binned).
     """
     X, mz = np.asarray(X, float), np.asarray(mz, float)
-    start = np.floor(mz.min() / bin_width + 1e-9) * bin_width
-    idx = np.floor((mz - start) / bin_width + 1e-9).astype(int)     # bin of each point
-    bins, first = np.unique(idx, return_index=True)                 # mz is sorted
-    Xb = np.add.reduceat(X, first, axis=1)
+    if X.ndim != 2 or X.shape[1] != mz.size:
+        raise ValueError(f"spectra {X.shape} do not match the m/z axis ({mz.size} points)")
+    if bin_width <= 0 or mz_max <= mz_min:
+        raise ValueError("need BIN_WIDTH > 0 and MZ_MAX > MZ_MIN")
+    if labels not in ('mean_mz', 'centroid', 'lower_edge'):
+        raise ValueError("BIN_LABELS must be 'mean_mz', 'centroid' or 'lower_edge'")
+    if np.any(np.diff(mz) <= 0):
+        raise ValueError("m/z values must be strictly increasing")
+    n_bins = int(np.floor((mz_max - mz_min) / bin_width + 1e-9))
+    k = np.floor((mz - mz_min) / bin_width + 1e-9).astype(np.int64)     # bin of each point
+    inside = (k >= 0) & (k < n_bins)
+    if not inside.any():
+        raise ValueError(f"no instrument points between m/z {mz_min} and {mz_max}")
+    k, Xi, mzi = k[inside], X[:, inside], mz[inside]
+    occupied, first = np.unique(k, return_index=True)                   # mz is sorted
+    Xb = np.add.reduceat(Xi, first, axis=1)
+    total = Xi.sum(axis=0)
+    weight = np.add.reduceat(total, first)
+    keep = weight > 0
     if labels == 'mean_mz':
-        mzb = np.add.reduceat(mz, first) / np.diff(np.r_[first, mz.size])
-    elif labels == 'lower_edge':
-        mzb = start + bins * bin_width
+        mzb = (np.add.reduceat(mzi, first) / np.diff(np.r_[first, mzi.size]))[keep]
+    elif labels == 'centroid':
+        mzb = np.add.reduceat(total * mzi, first)[keep] / weight[keep]
     else:
-        raise ValueError("BIN_LABELS must be 'mean_mz' or 'lower_edge'")
-    keep = Xb.sum(axis=0) > 0
-    return Xb[:, keep], mzb[keep]
-
-
-def filter_mass_range(X, mz, mz_min=100, mz_max=2000):
-    keep = (mz >= mz_min) & (mz <= mz_max)
-    return X[:, keep], mz[keep]
+        mzb = mz_min + occupied[keep] * bin_width
+    return Xb[:, keep], mzb
 
 
 def tic_normalise(X):
     """Each spectrum divided by its total ion current (fractions of TIC)."""
     X = np.asarray(X, float)
-    return X / X.sum(axis=1, keepdims=True)
+    tic = X.sum(axis=1, keepdims=True)
+    if np.any(tic <= 0):
+        raise ValueError(f"spectra with no signal in the m/z range: rows "
+                         f"{np.flatnonzero(tic.ravel() <= 0)[:5].tolist()}")
+    return X / tic
 
 
 def feature_filter_mask(X_lin, variance_percentile=25, abundance_percentile=5):
@@ -139,10 +166,28 @@ def feature_filter_mask(X_lin, variance_percentile=25, abundance_percentile=5):
     return keep
 
 
-def log10_transform(X_lin):
-    """log10 with an offset of half the smallest positive value (zeros stay finite)."""
-    pos = X_lin[X_lin > 0]
-    return np.log10(X_lin + (pos.min() / 2 if pos.size else 1e-12))
+def log_offset(X_lin: ArrayLike, how: str = 'global') -> FloatArray:
+    """Offset added before log10 so that zeros stay finite, one value per bin.
+
+    how='global' : half the smallest positive value of the whole matrix
+    how='per_bin': half each bin's own smallest positive value, so a zero sits
+                   just below that bin's other values instead of 1-2 log units
+                   below them (bins with no positive value get the global one)
+    """
+    X = np.asarray(X_lin, float)
+    if how not in ('global', 'per_bin'):
+        raise ValueError("LOG_OFFSET must be 'global' or 'per_bin'")
+    pos = X[X > 0]
+    overall = pos.min() / 2 if pos.size else 1e-12
+    if how == 'global':
+        return np.full(X.shape[1], overall)
+    smallest = np.where(X > 0, X, np.inf).min(axis=0)
+    return np.where(np.isfinite(smallest), smallest / 2, overall)
+
+
+def log10_transform(X_lin, offset='global'):
+    """log10 after adding ``log_offset(X_lin, offset)`` (zeros stay finite)."""
+    return np.log10(X_lin + log_offset(X_lin, offset))
 
 
 def scale(X, method='autoscale'):
@@ -156,14 +201,59 @@ def scale(X, method='autoscale'):
     raise ValueError("SCALING must be 'autoscale' or 'pareto'")
 
 
+@dataclass
+class FoldPreprocessor:
+    """The label-free filters, the log10 offset and the scaling, fitted on the
+    training spectra only and then applied unchanged to held-out spectra.
+
+    Input is the TIC-normalised matrix (TIC is per spectrum and needs no fit).
+    Bins that are constant in the training spectra are always dropped.
+    """
+    variance_percentile: float = 25.0
+    abundance_percentile: float = 5.0
+    scaling: str = 'autoscale'
+    offset: str = 'global'
+    keep_: NDArray[np.bool_] = field(init=False, repr=False)
+    offset_: FloatArray = field(init=False, repr=False)
+    mean_: FloatArray = field(init=False, repr=False)
+    scale_: FloatArray = field(init=False, repr=False)
+
+    def fit(self, X_train: ArrayLike) -> FoldPreprocessor:
+        X = self._check(X_train)
+        if self.scaling not in ('autoscale', 'pareto'):
+            raise ValueError("SCALING must be 'autoscale' or 'pareto'")
+        keep = feature_filter_mask(X, self.variance_percentile, self.abundance_percentile)
+        keep &= X.std(axis=0) > 0
+        if not keep.any():
+            raise ValueError("the filters removed every bin")
+        off = log_offset(X[:, keep], self.offset)
+        L = np.log10(X[:, keep] + off)
+        sd = L.std(axis=0, ddof=1)
+        sd = np.where(sd > 0, sd, 1.0)
+        self.keep_, self.offset_, self.mean_ = keep, off, L.mean(axis=0)
+        self.scale_ = np.sqrt(sd) if self.scaling == 'pareto' else sd
+        return self
+
+    def transform(self, X: ArrayLike) -> FloatArray:
+        X = self._check(X)
+        return (np.log10(X[:, self.keep_] + self.offset_) - self.mean_) / self.scale_
+
+    @staticmethod
+    def _check(X: ArrayLike) -> FloatArray:
+        X = np.asarray(X, float)
+        if X.ndim != 2 or not np.isfinite(X).all() or (X < 0).any():
+            raise ValueError("expected a finite, non-negative 2-D matrix of TIC-normalised spectra")
+        return X
+
+
 def build_matrices(X_raw, mz_raw, bin_width=0.5, labels='mean_mz', mz_min=100,
-                   mz_max=2000, variance_percentile=25, abundance_percentile=5):
-    """Run steps 2-6. Returns a dict with
+                   mz_max=2000, variance_percentile=25, abundance_percentile=5,
+                   log_offset_rule='global'):
+    """Run steps 2-5. Returns a dict with
     'binned' (raw binned, in range), 'mz_binned', 'linear' (TIC-normalised,
     filtered), 'log' (log10 of 'linear'), 'mz' (filtered bins)."""
-    Xb, mzb = bin_features(X_raw, mz_raw, bin_width, labels)
-    Xb, mzb = filter_mass_range(Xb, mzb, mz_min, mz_max)
+    Xb, mzb = bin_spectra(X_raw, mz_raw, bin_width, mz_min, mz_max, labels)
     Xn = tic_normalise(Xb)
     keep = feature_filter_mask(Xn, variance_percentile, abundance_percentile)
     return {'binned': Xb, 'mz_binned': mzb, 'linear': Xn[:, keep],
-            'log': log10_transform(Xn[:, keep]), 'mz': mzb[keep]}
+            'log': log10_transform(Xn[:, keep], log_offset_rule), 'mz': mzb[keep]}

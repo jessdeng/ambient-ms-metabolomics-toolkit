@@ -21,6 +21,11 @@ determined by the data:
   random forest  the list changes with the random seed (seed-to-seed agreement is
                  reported in every run).
 
+Both tree ensembles break ties between equally good splits at random, and with
+few colonies many splits are equally good. Their importances are therefore
+averaged over many seeds (RF_SEEDS, GB_SEEDS), and the agreement between the two
+halves of the seeds is reported for each so the remaining instability is visible.
+
 Method comparison. Six importance definitions are also computed on the colony
 means and compared (METHODS): component-1 PLS-DA VIP and five classifier-derived
 measures (Ridge, logistic regression, linear SVM, random forest, gradient
@@ -36,6 +41,7 @@ separation among colonies; they are not tests of a treatment effect.
 import numpy as np
 import pandas as pd
 from scipy import stats
+from joblib import Parallel, delayed
 from scipy.stats import hypergeom
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import RidgeClassifier
@@ -59,9 +65,22 @@ def colony_means(X, colony_id, condition):
 
 
 def top_set(score, n):
-    """Indices of the n highest scores; ties broken by feature index (ascending m/z)."""
-    score = np.nan_to_num(np.asarray(score, float), nan=-np.inf)
-    return set(np.lexsort((np.arange(score.size), -score))[:n].tolist())
+    """Indices of the n highest scores; ties broken by feature index (ascending m/z).
+
+    A score of zero (or NaN) means the method did not use the feature, so such
+    features are never admitted: when fewer than n features have a positive
+    score the set is smaller than n rather than padded with the lowest m/z bins."""
+    score = np.nan_to_num(np.asarray(score, float), nan=0.0)
+    order = np.lexsort((np.arange(score.size), -score))[:n]
+    return set(order[score[order] > 0].tolist())
+
+
+def ties_at_cutoff(score, n):
+    """How many features share the score of the last one admitted to the top-n
+    (1 = the cut is unique; 0 = no feature has a positive score)."""
+    score = np.nan_to_num(np.asarray(score, float), nan=0.0)
+    kept = np.sort(score[score > 0])[::-1][:n]
+    return int((score == kept[-1]).sum()) if kept.size else 0
 
 
 def benjamini_hochberg(p):
@@ -163,11 +182,35 @@ def technical_cv(X_lin, colony_id):
     return cv.median(axis=0, skipna=True).to_numpy()
 
 
-def rank_features(Xc_scaled, Xc_log, cond_c, top_n=50, min_rankers=2, rf_seeds=25, seed=42,
-                  consensus_rule='n_families_topk', max_worst_rank=50, min_families=2):
+def _rf_importance(X, y, seed):
+    return RandomForestClassifier(n_estimators=500, random_state=seed).fit(X, y).feature_importances_
+
+
+def _gb_importance(X, y, seed):
+    return fit_importance('gb', X, y, seed=seed)['global']
+
+
+def seed_averaged_importance(fit, X, y, seed, n_seeds, top_n, n_jobs=1):
+    """Mean of ``fit(X, y, s)`` over the seeds seed .. seed + n_seeds - 1, and the
+    top-N Jaccard between the means of the first and second half of the seeds
+    (NaN with one seed). The result does not depend on ``n_jobs``."""
+    n_seeds = int(max(1, n_seeds))
+    per_seed = np.array(Parallel(n_jobs=n_jobs)(
+        delayed(fit)(X, y, seed + s) for s in range(n_seeds)))
+    half = n_seeds // 2
+    agreement = jaccard(top_set(per_seed[:half].mean(0), top_n),
+                        top_set(per_seed[half:].mean(0), top_n)) if n_seeds > 1 else np.nan
+    return per_seed.mean(0), agreement
+
+
+def rank_features(Xc_scaled, Xc_log, cond_c, top_n=50, min_rankers=2, rf_seeds=100, seed=42,
+                  consensus_rule='n_families_topk', max_worst_rank=50, min_families=2,
+                  gb_seeds=100, n_jobs=1):
     """Scores, ranks and top-N membership for the two voters and the six compared
-    importance definitions. Returns (table, info) where info holds the scores and
-    the random-forest seed-to-seed agreement.
+    importance definitions. Returns (table, info) where info holds the scores, the
+    seed-to-seed agreement of the random forest and of gradient boosting, and for
+    every ranking the size of its top-N (smaller than N when fewer features have
+    a positive score) and the number of features tied at the cut.
 
     Columns added for the method comparison: ``n_methods`` (0-6, how many of
     METHODS place the bin in their top-N), the family-level ranks ``agg_*`` and
@@ -182,13 +225,10 @@ def rank_features(Xc_scaled, Xc_log, cond_c, top_n=50, min_rankers=2, rf_seeds=2
         'lr': fit_importance('lr', Xc_scaled, cond_c, seed=seed)['global'],
         'svm': fit_importance('svm', Xc_scaled, cond_c, seed=seed)['global'],
     }
-    per_seed = [RandomForestClassifier(n_estimators=500, random_state=seed + s)
-                .fit(Xc_scaled, cond_c).feature_importances_ for s in range(rf_seeds)]
-    scores['rf'] = np.mean(per_seed, axis=0)
-    scores['gb'] = fit_importance('gb', Xc_scaled, cond_c, seed=seed)['global']
-    half = max(1, rf_seeds // 2)
-    rf_agreement = jaccard(top_set(np.mean(per_seed[:half], 0), top_n),
-                           top_set(np.mean(per_seed[half:], 0), top_n)) if rf_seeds > 1 else np.nan
+    scores['rf'], rf_agreement = seed_averaged_importance(
+        _rf_importance, Xc_scaled, cond_c, seed, rf_seeds, top_n, n_jobs)
+    scores['gb'], gb_agreement = seed_averaged_importance(
+        _gb_importance, Xc_scaled, cond_c, seed, gb_seeds, top_n, n_jobs)
 
     table = pd.DataFrame(index=range(Xc_log.shape[1]))
     for m, s in scores.items():
@@ -202,7 +242,10 @@ def rank_features(Xc_scaled, Xc_log, cond_c, top_n=50, min_rankers=2, rf_seeds=2
     table = pd.concat([table, aggregate_ranks({m: scores[m] for m in METHODS}, top_k=top_n)], axis=1)
     table['consensus'] = consensus_mask(table, consensus_rule, max_worst_rank, min_families)
     table = pd.concat([table, screen], axis=1)
-    return table, {'rf_seed_agreement': rf_agreement, 'scores': scores}
+    return table, {'rf_seed_agreement': rf_agreement, 'gb_seed_agreement': gb_agreement,
+                   'scores': scores,
+                   'top_size': {m: int(table[f'in_{m}_top'].sum()) for m in scores},
+                   'ties_at_cutoff': {m: ties_at_cutoff(s, top_n) for m, s in scores.items()}}
 
 
 def selected_by(table):

@@ -40,15 +40,19 @@ def test_vip_matches_ropls_and_mixomics(synthetic, A):
     assert set(np.argsort(-v0)[:10]) == set(np.argsort(-exp[f'ropls_A{A}'].values)[:10])
 
 
-def test_component1_vip_is_normalised_first_weight(synthetic):
-    # Reference analysis: VIP_j = sqrt(p) |w1_j| / ||w1||, w1 = dominant left
-    # singular vector of Xc^T Yc (independent of any Y-loading weighting).
-    X, y, _ = synthetic
-    Y = pd.get_dummies(y).values.astype(float)
-    Xc, Yc = X - X.mean(0), Y - Y.mean(0)
-    w1 = np.linalg.svd(Xc.T @ Yc, full_matrices=False)[0][:, 0]
-    expected = np.sqrt(X.shape[1]) * np.abs(w1) / np.linalg.norm(w1)
-    np.testing.assert_allclose(compute_vip_1comp(X, y, **TIGHT), expected, atol=1e-6)
+def test_component1_vip_closed_form_matches_nipals_and_r(synthetic):
+    # compute_vip_1comp is VIP_j = sqrt(p) |w1_j|, w1 = leading left singular
+    # vector of Xc^T Yc. It must equal the iterative solution at the validated
+    # settings and the two R implementations.
+    X, y, exp = synthetic
+    v = compute_vip_1comp(X, y)
+    np.testing.assert_allclose(v, compute_vip(X, y, n_components=1, **TIGHT), atol=1e-6)
+    np.testing.assert_allclose(v, exp['ropls_A1'].values, atol=1e-6)
+    np.testing.assert_allclose(v, exp['mixomics_A1'].values, atol=1e-6)
+    assert np.isclose(np.mean(v ** 2), 1.0)
+    np.testing.assert_allclose(compute_vip_1comp(X[::-1], y[::-1]), v, atol=1e-12)   # row order
+    with pytest.raises(ValueError, match='two classes'):
+        compute_vip_1comp(X, np.zeros(len(y)))
 
 
 @pytest.mark.parametrize('A', [1, 2, 3])
