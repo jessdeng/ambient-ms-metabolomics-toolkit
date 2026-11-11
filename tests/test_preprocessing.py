@@ -130,3 +130,10 @@ def test_fold_preprocessor_is_fitted_on_training_rows_only():
         FoldPreprocessor().fit(-X)
     with pytest.raises(ValueError, match='every bin'):
         FoldPreprocessor(0, 0).fit(np.ones((4, 3)))
+
+
+def test_identical_spectra_are_reported():
+    from standard.preprocessing import identical_spectra
+    X = np.array([[1.0, 2, 3], [1, 2, 3], [1, 2, 4], [9, 9, 9], [1, 2, 3]])
+    assert identical_spectra(X, list('abcde')) == [['a', 'b', 'e']]
+    assert identical_spectra(X[2:4], ['c', 'd']) == []

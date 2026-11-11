@@ -64,12 +64,13 @@ import numpy as np
 import pandas as pd
 
 import config
-from standard.preprocessing import load_experiment, build_matrices, scale, tic_normalise
+from standard.preprocessing import (load_experiment, build_matrices, scale, tic_normalise,
+                                    identical_spectra)
 from standard.pipeline import plot_vip
 from shared.grouping import resolve_design
 from shared.ranking import (colony_means, rank_features, colony_consistency,
                             variance_partition, technical_cv, concordance, selected_by,
-                            VOTERS, METHODS)
+                            voter_agreement_null, VOTERS, METHODS)
 from shared.feature_groups import build_signal_groups
 from shared.evidence import candidate_evidence
 from shared.pca import run_pca
@@ -135,6 +136,36 @@ def _permutation_models():
     return names
 
 
+BEST_OF_MODELS = 'Best of these models'
+
+
+def _permutation_row(name, obs, null, p, k):
+    print(f"    {name:20} observed {obs:.2f}   shuffled {null.mean():.2f} "
+          f"(max {null.max():.2f})   p = {p:.3f}", flush=True)
+    return dict(model=name, observed_accuracy=obs, null_mean=null.mean(),
+                null_95th_percentile=np.percentile(null, 95), null_max=null.max(),
+                p_value=p, n_permutations=len(null), cv=f'{k}-fold colony-grouped x 1')
+
+
+def _voter_null_lines(null, n_top):
+    """The agreement of the two voters against shuffled labels, in words."""
+    if null is None:
+        return []
+    s = null['null_shared']
+    verdict = ("more than shuffled labels give" if null['p_shared'] <= 0.05 else
+               "no more than shuffled labels give, so their agreement is not evidence for a bin")
+    return [f"Univariate F and VIP share {null['observed_shared']} of their top-{n_top}. With the "
+            f"condition labels shuffled among colonies ({null['n_permutations']} shuffles) they share",
+            f"{s.mean():.1f} on average (95th percentile {np.percentile(s, 95):.0f}); "
+            f"p = {null['p_shared']:.3f}: {verdict}."]
+
+
+def _consistent_null_line(null):
+    return (f"of the {null['observed_shared']} bins shared by univariate F and VIP, "
+            f"{null['observed_consistent']} are consistent across all colonies; with shuffled "
+            f"labels {null['null_consistent'].mean():.1f} of {null['null_shared'].mean():.1f} are")
+
+
 def run_experiment(experiment):
     """All stages for one experiment. Returns a dict of headline results."""
     t0 = time.time()
@@ -151,7 +182,8 @@ def run_experiment(experiment):
     # -- 1. spectra and design --------------------------------------------------
     progress.stage("Design: spectra, conditions and colonies")
     X_raw, names, raw_mz = load_experiment(exp_dir)
-    cond, colony = resolve_design(exp_dir, names, config.METADATA_MANIFEST, config.EXPECTED_TECH_REPS)
+    cond, colony = resolve_design(exp_dir, names, config.METADATA_MANIFEST, config.EXPECTED_TECH_REPS,
+                                  allow_unequal_colonies=config.ALLOW_UNEQUAL_COLONIES)
     per_cond = {c: len(set(colony[cond == c])) for c in np.unique(cond)}
     print(f"  {len(names)} spectra, {len(set(colony))} colonies; colonies per condition: "
           + ', '.join(f"{c} {n}" for c, n in per_cond.items()))
@@ -161,6 +193,11 @@ def run_experiment(experiment):
     if odd:
         note = (f"{len(odd)} colonies do not have the usual {usual} spectra: {odd}. If these are "
                 "one colony named two ways, fix the file names or add a metadata manifest.")
+        print(f"  WARNING: {note}")
+        report['notes'].append(note)
+    for same in identical_spectra(X_raw, names):
+        note = (f"identical spectra (one file exported or copied twice?): {', '.join(same)}. They "
+                "count as separate sprays, which understates the spray-to-spray variation.")
         print(f"  WARNING: {note}")
         report['notes'].append(note)
     report.update(n_spectra=len(names), n_colonies=len(set(colony)), per_condition=per_cond)
@@ -188,7 +225,8 @@ def run_experiment(experiment):
     # -- 4. rankings on colony means ---------------------------------------------
     progress.stage(f"Rankings: univariate F and six importance methods on {len(set(colony))} colony means")
     Xc, colony_ids, cond_c = colony_means(M['log'], colony, cond)
-    table, info = rank_features(scale(Xc, config.SCALING), Xc, cond_c, n_top, config.MIN_RANKERS,
+    Xc_scaled = scale(Xc, config.SCALING)
+    table, info = rank_features(Xc_scaled, Xc, cond_c, n_top, config.MIN_RANKERS,
                                 config.RF_SEEDS, seed, config.CONSENSUS_RULE,
                                 config.CONSENSUS_MAX_WORST_FAMILY_RANK,
                                 config.CONSENSUS_MIN_FAMILIES_TOPK,
@@ -235,6 +273,15 @@ def run_experiment(experiment):
     # -- 5. do the methods prioritise the same features? --------------------------
     progress.stage("Method comparison: do the rankings prioritise the same features?")
     conc = concordance(info['scores'], n_top)
+    voter_null = None
+    if config.N_RANKING_PERMUTATIONS > 0:
+        voter_null = voter_agreement_null(Xc_scaled, Xc, cond_c, n_top, config.N_RANKING_PERMUTATIONS, seed)
+        pair = (conc.ranker_a == 'univariate') & (conc.ranker_b == 'vip')
+        conc.loc[pair, 'shuffled_shared_mean'] = voter_null['null_shared'].mean()
+        conc.loc[pair, 'shuffled_shared_95th_percentile'] = np.percentile(voter_null['null_shared'], 95)
+        conc.loc[pair, 'shuffled_jaccard_mean'] = np.nanmean(voter_null['null_jaccard'])
+        conc.loc[pair, 'shuffled_p'] = voter_null['p_shared']
+        conc.loc[pair, 'n_shuffles'] = voter_null['n_permutations']
     conc.to_csv(os.path.join(out, f'ranker_concordance_{safe}.csv'), index=False)
     overlap = table[(table['n_methods'] >= config.MIN_METHODS_OVERLAP) | table['consensus']]
     overlap = overlap.sort_values(['agg_worst_family_rank', 'agg_mean_family_rank', 'n_methods'],
@@ -243,17 +290,20 @@ def run_experiment(experiment):
     votes = table['n_methods'].value_counts().sort_index()
     rule = consensus_label(config.CONSENSUS_RULE, config.CONSENSUS_MAX_WORST_FAMILY_RANK,
                            config.CONSENSUS_MIN_FAMILIES_TOPK)
-    print(f"  shared top-{n_top} features with VIP (comp. 1) (chance {n_top * n_top / mz.size:.1f}):")
+    print(f"  shared top-{n_top} features with VIP (comp. 1) ({n_top * n_top / mz.size:.1f} expected "
+          "of two unrelated lists):")
     vip_rows = conc[(conc.ranker_a == 'vip') | (conc.ranker_b == 'vip')]
     for row in vip_rows.itertuples():
         other = row.ranker_b if row.ranker_a == 'vip' else row.ranker_a
         print(f"    {RANKER_NAMES[other]:<20} {row.shared:>3}")
+    for line in _voter_null_lines(voter_null, n_top):
+        print(f"  {line}")
     print("  bins by number of methods (of 6) that place them in the top-"
           f"{n_top}: " + ', '.join(f"{int(k)} methods: {int(v)}" for k, v in votes.items() if k > 0))
     print(f"  {rule}: {int(table['consensus'].sum())} bins")
     corroboration_figure.figure(experiment, safe, out)
     ranker_agreement.figure(experiment, safe, out)
-    report.update(concordance=conc, votes=votes, consensus_rule=rule,
+    report.update(concordance=conc, votes=votes, consensus_rule=rule, voter_null=voter_null,
                   n_consensus=int(table['consensus'].sum()), n_overlap=len(overlap))
 
     # -- 6. the follow-up list, with spectral evidence ---------------------------
@@ -272,6 +322,8 @@ def run_experiment(experiment):
           f"{config.MIN_RANKERS} of {len(VOTERS)}), {int(table['consensus'].sum())} by the method "
           f"consensus, {int((table['candidate'] & table['consensus']).sum())} by both")
     print(f"  consistent across all colonies: {n_cons}")
+    if voter_null is not None:
+        print(f"  {_consistent_null_line(voter_null)}")
     conds = np.unique(cond_c)
     plot_vip(info['scores']['vip'], mz, np.vstack([Xc[cond_c == c].mean(0) for c in conds]),
              list(conds), config.N_TOP_VIP, experiment, os.path.join(out, f'vip_scores_{safe}.png'))
@@ -315,7 +367,7 @@ def run_experiment(experiment):
         min_col = min(per_cond.values())
         k = int(max(2, min(config.CV_FOLDS, min_col)))
         cv = RepeatedColonyKFold(n_splits=k, n_repeats=1, random_state=seed)
-        rows = []
+        rows, observed, nulls = [], {}, {}
         for name in _permutation_models():
             obs, null, p = colony_permutation_test(
                 MODELS[name](seed), X_tic, cond, colony, cv, n_permutations=config.N_PERMUTATIONS,
@@ -323,12 +375,15 @@ def run_experiment(experiment):
                 variance_percentile=config.VARIANCE_PERCENTILE,
                 abundance_percentile=config.ABUNDANCE_PERCENTILE,
                 log_offset=config.LOG_OFFSET)
-            rows.append(dict(model=name, observed_accuracy=obs, null_mean=null.mean(),
-                             null_95th_percentile=np.percentile(null, 95), null_max=null.max(),
-                             p_value=p, n_permutations=config.N_PERMUTATIONS,
-                             cv=f'{k}-fold colony-grouped x 1'))
-            print(f"    {name:20} observed {obs:.2f}   shuffled {null.mean():.2f} "
-                  f"(max {null.max():.2f})   p = {p:.3f}", flush=True)
+            observed[name], nulls[name] = obs, null
+            rows.append(_permutation_row(name, obs, null, p, k))
+        if len(nulls) > 1:
+            # every model saw the same shuffles, so the best model can be compared with
+            # the best model of each shuffle: this allows for picking the winner
+            best = max(observed.values())
+            null = np.max(np.vstack(list(nulls.values())), axis=0)
+            p = float((np.sum(null >= best) + 1) / (len(null) + 1))
+            rows.append(_permutation_row(BEST_OF_MODELS, best, null, p, k))
         perm = pd.DataFrame(rows)
         perm.to_csv(os.path.join(out, f'permutation_test_{safe}.csv'), index=False)
     report['permutation'] = perm
@@ -368,12 +423,14 @@ def write_summary(rep):
           f"  Features: {rep['n_bins']} bins, {rep['n_features']} after the filters",
           "", "-- Structure of the data " + "-" * 47, f"  PCA: {rep['pca']}",
           "", "-- Method comparison " + "-" * 51,
-          f"  Shared top-{n_top} features between rankings (chance "
-          f"{n_top * n_top / rep['n_features']:.1f}):"]
+          f"  Shared top-{n_top} features between rankings ({n_top * n_top / rep['n_features']:.1f} "
+          "expected of two unrelated lists;",
+          "  rankings fitted to the same colonies are not unrelated):"]
     conc = rep['concordance']
     for r in conc.itertuples():
         L.append(f"    {RANKER_NAMES[r.ranker_a]:<20} vs {RANKER_NAMES[r.ranker_b]:<20} {r.shared:>3}"
                  f"   (Jaccard {r.jaccard:.2f})")
+    L += [f"  {line}" for line in _voter_null_lines(rep.get('voter_null'), n_top)]
     L.append(f"  Seed-to-seed agreement (top-{n_top} Jaccard between two halves of the seeds): "
              f"random forest {rep['rf_seed_agreement']:.2f} ({config.RF_SEEDS} seeds), "
              f"gradient boosting {rep['gb_seed_agreement']:.2f} ({config.GB_SEEDS} seeds)")
@@ -384,7 +441,10 @@ def write_summary(rep):
     L += ["", "-- Follow-up list " + "-" * 54,
           f"  {rep['n_candidates']} bins: {rep['n_voter']} by the colony-level screen with VIP, "
           f"{rep['n_consensus']} by the method consensus",
-          f"  Consistent across all colonies: {rep['n_consistent']}", ""]
+          f"  Consistent across all colonies: {rep['n_consistent']}"]
+    if rep.get('voter_null') is not None:
+        L.append(f"  ({_consistent_null_line(rep['voter_null'])})")
+    L.append("")
     cand = rep['candidates']
     if len(cand):
         L.append(f"  {'m/z':>8}  {'methods':>7}  {'F rank':>6}  {'VIP rank':>8}  {'apex':>7}  "
@@ -413,6 +473,9 @@ def write_summary(rep):
         for r in perm.itertuples():
             L.append(f"    {r.model:<20} observed {r.observed_accuracy:.2f}   shuffled "
                      f"{r.null_mean:.2f} (max {r.null_max:.2f})   p = {r.p_value:.3f}")
+        if (perm.model == BEST_OF_MODELS).any():
+            L.append(f"  '{BEST_OF_MODELS}' compares the highest accuracy with the highest in each "
+                     "shuffle, which allows for picking the winner.")
 
     L += ["", "-- Output files " + "-" * 56]
     for f in sorted(set(os.listdir(rep['out'])) | {f"summary_{rep['safe']}.txt"}):

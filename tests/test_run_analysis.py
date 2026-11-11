@@ -15,6 +15,7 @@ def test_demo_run_writes_the_expected_tables(tmp_path, monkeypatch):
     monkeypatch.setattr(run_analysis.config, 'GB_SEEDS', 2)
     monkeypatch.setattr(run_analysis.config, 'N_CV_REPEATS', 1)
     monkeypatch.setattr(run_analysis.config, 'N_PERMUTATIONS', 9)
+    monkeypatch.setattr(run_analysis.config, 'N_RANKING_PERMUTATIONS', 20)
     monkeypatch.setattr(run_analysis.config, 'N_JOBS', 1)
     run_analysis.main()
     out = tmp_path / 'results' / 'sample_experiment'
@@ -43,7 +44,15 @@ def test_demo_run_writes_the_expected_tables(tmp_path, monkeypatch):
     overlap = pd.read_csv(out / 'feature_overlap_sample_experiment.csv')
     assert ((overlap.n_methods >= 2) | overlap.consensus).all()
     perm = pd.read_csv(out / 'permutation_test_sample_experiment.csv')
-    assert perm.p_value.between(1 / 10, 1).all() and len(perm) == 5
+    assert perm.p_value.between(1 / 10, 1).all()
+    assert list(perm.model[:6]) == list(run_analysis.MODELS)          # all six, Gradient Boosting included
+    best = perm[perm.model == run_analysis.BEST_OF_MODELS].iloc[0]     # allows for picking the winner
+    assert len(perm) == 7 and best.observed_accuracy == perm.observed_accuracy[:6].max()
+    assert best.null_mean >= perm.null_mean[:6].max() and best.p_value >= perm.p_value[:6].min()
+    conc = pd.read_csv(out / 'ranker_concordance_sample_experiment.csv')
+    voters = conc[(conc.ranker_a == 'univariate') & (conc.ranker_b == 'vip')].iloc[0]
+    assert voters.n_shuffles == 20 and 0 <= voters.shuffled_shared_mean <= 50
+    assert conc.shuffled_p.notna().sum() == 1 and 'With the condition labels shuffled' in summary
     assert not any(c in ranks.columns for c in ('p_value', 'q_value_BH'))
 
 
@@ -55,7 +64,7 @@ def test_all_experiments_writes_the_cross_experiment_outputs(tmp_path, monkeypat
     monkeypatch.setattr(run_analysis, '_ROOT', str(tmp_path))
     monkeypatch.setenv('TOOLKIT_EXPERIMENT', 'all')
     for key, value in (('RF_SEEDS', 2), ('GB_SEEDS', 2), ('N_JOBS', 1), ('N_CV_REPEATS', 1),
-                       ('RUN_PERMUTATION', False)):
+                       ('RUN_PERMUTATION', False), ('N_RANKING_PERMUTATIONS', 0)):
         monkeypatch.setattr(run_analysis.config, key, value)
     assert run_analysis._experiments() == ['exp_a', 'exp_b']          # the bundled demo is skipped
     run_analysis.main()
@@ -65,3 +74,15 @@ def test_all_experiments_writes_the_cross_experiment_outputs(tmp_path, monkeypat
     assert (res / 'candidates_all_experiments.csv').exists()
     assert (res / 'pca_overview.png').exists() and (res / 'vip_vs_nmethods.png').exists()
     assert not (res / 'exp_a' / 'permutation_test_exp_a.csv').exists()
+
+
+def test_a_colony_named_two_ways_stops_the_run(tmp_path, monkeypatch):
+    exp = tmp_path / 'data' / 'sample_experiment'
+    shutil.copytree(os.path.join(ROOT, 'data', 'sample_experiment'), exp)
+    os.rename(exp / 'CondA' / 'colony1' / 'CondA_colony1_T2.csv', exp / 'CondA' / 'colony2' / 'moved_T3.csv')
+    from standard import run_analysis
+    import pytest
+    monkeypatch.setattr(run_analysis, '_ROOT', str(tmp_path))
+    monkeypatch.setenv('TOOLKIT_EXPERIMENT', 'sample_experiment')
+    with pytest.raises(ValueError, match='do not have the usual 2 spectra'):
+        run_analysis.main()

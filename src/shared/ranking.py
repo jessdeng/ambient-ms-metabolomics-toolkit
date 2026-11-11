@@ -34,9 +34,15 @@ a bin in their top-N. The count is descriptive: Ridge, logistic regression and
 the SVM are closely related, so ``consensus`` uses one vote per model family
 (penalised linear, tree ensembles, PLS; shared/rank_aggregation.py).
 
+Agreement between rankings is not evidence by itself: all of them are fitted to
+the same colony means. voter_agreement_null gives the reference for the two
+voters (labels shuffled among colonies, both rankings recomputed).
+
 Condition and plate are aliased, so screen_p / screen_q describe condition-plate
 separation among colonies; they are not tests of a treatment effect.
 """
+
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -147,6 +153,53 @@ def colony_consistency(Xc_log, cond_c, top_condition, bottom_condition):
                       f'depleted in {bottom_condition[j]}') if gap[j] > 0 else 'none'
     return pd.DataFrame({'colony_gap_log10': gap, 'colony_pattern': pattern,
                          'colonies_consistent': gap > 0})
+
+
+def stands_apart(Xc_log, cond_c):
+    """``colonies_consistent`` of colony_consistency for every bin at once: does
+    any condition have all its colonies above, or all below, every other colony?"""
+    out = np.zeros(Xc_log.shape[1], dtype=bool)
+    for c in np.unique(cond_c):
+        a, b = Xc_log[cond_c == c], Xc_log[cond_c != c]
+        out |= (a.min(0) > b.max(0)) | (a.max(0) < b.min(0))
+    return out
+
+
+def voter_agreement_null(Xc_scaled, Xc_log, cond_c, top_n=50, n_permutations=500, seed=42):
+    """How many bins would the two voters share if colonies and conditions were unrelated?
+
+    Univariate F and component-1 VIP are computed from the same colony means and
+    both reward between-condition separation, so their top-N lists overlap
+    whatever the labels are. The reference is therefore not the overlap of two
+    unrelated lists (``concordance``'s ``chance``) but the overlap obtained when
+    the condition labels are shuffled among the colonies and both rankings are
+    recomputed. The same shuffles give the number of shared bins that look
+    'consistent across all colonies'.
+
+    Returns a dict: observed and shuffled ``shared`` (count), ``jaccard`` and
+    ``consistent`` (shared bins with one condition standing apart), with
+    ``p_shared`` = (shuffles sharing at least as many + 1) / (n_permutations + 1).
+    """
+    Xc_scaled, Xc_log, cond_c = np.asarray(Xc_scaled, float), np.asarray(Xc_log, float), np.asarray(cond_c)
+
+    def one(labels):
+        groups = [Xc_log[labels == c] for c in np.unique(labels)]
+        with np.errstate(divide='ignore', invalid='ignore'), warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            F = np.nan_to_num(stats.f_oneway(*groups, axis=0).statistic, nan=0.0)
+            a, b = top_set(F, top_n), top_set(compute_vip_1comp(Xc_scaled, labels), top_n)
+        both = sorted(a & b)
+        return (len(both), jaccard(a, b),
+                int(stands_apart(Xc_log[:, both], labels).sum()) if both else 0)
+
+    obs = one(cond_c)
+    rng = np.random.default_rng(seed)
+    null = np.array([one(rng.permutation(cond_c)) for _ in range(int(n_permutations))], dtype=float)
+    null = null.reshape(-1, 3)
+    return {'observed_shared': obs[0], 'observed_jaccard': obs[1], 'observed_consistent': obs[2],
+            'null_shared': null[:, 0], 'null_jaccard': null[:, 1], 'null_consistent': null[:, 2],
+            'p_shared': float((np.sum(null[:, 0] >= obs[0]) + 1) / (len(null) + 1)),
+            'n_permutations': len(null)}
 
 
 def variance_partition(X_log, condition, colony_id):
@@ -261,7 +314,9 @@ def jaccard(a, b):
 
 
 def concordance(scores, top_n):
-    """Pairwise top-N Jaccard between rankers, with the value expected by chance."""
+    """Pairwise top-N Jaccard between rankers. ``chance`` is the Jaccard expected
+    of two unrelated lists; rankings fitted to the same colonies are not
+    unrelated, so for the two voters use voter_agreement_null as the reference."""
     names = list(scores)
     p = len(next(iter(scores.values())))
     k = np.arange(top_n + 1)

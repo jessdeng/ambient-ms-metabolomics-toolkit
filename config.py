@@ -20,6 +20,9 @@ EXPERIMENT = 'sample_experiment'      # folder name under data/, or 'all' for ev
                                       # experiment there (same as --all)
 METADATA_MANIFEST = 'metadata_manifest.csv'   # file -> class + colony; used if present
 EXPECTED_TECH_REPS = None             # e.g. 3: stop if a colony has another count
+ALLOW_UNEQUAL_COLONIES = False        # false: stop if the colonies do not all have the same
+                                      # number of spectra (usually one colony named two ways,
+                                      # which would put its sprays in both training and test)
 
 # ── Spectra → features ──────────────────────────────────────────────────────────
 MZ_MIN = 100                          # Da
@@ -61,6 +64,10 @@ CONSENSUS_RULE = 'n_families_topk'    # top-N in >= CONSENSUS_MIN_FAMILIES_TOPK 
 CONSENSUS_MIN_FAMILIES_TOPK = 2
 CONSENSUS_MAX_WORST_FAMILY_RANK = 50
 MIN_METHODS_OVERLAP = 2               # feature_overlap table: top-N in >= this many methods
+N_RANKING_PERMUTATIONS = 500          # shuffles of the condition labels among colonies used as
+                                      # the reference for the agreement between univariate F
+                                      # and VIP (0 = skip). Both are fitted to the same colony
+                                      # means, so they agree far more than unrelated lists would
 
 # ── Classifier comparison (condition-plate discriminability) ────────────────────
 # Six models (RF, SVM, GB, LR, LDA, Ridge), default settings, folds that hold out
@@ -74,8 +81,13 @@ N_CV_REPEATS = 10                     # repeats with different colony splits
 # repeated. The smallest attainable p-value is 1 / (N_PERMUTATIONS + 1).
 RUN_PERMUTATION = True
 N_PERMUTATIONS = 200
-PERMUTATION_MODELS = 'Random Forest, SVM, Logistic Regression, LDA, Ridge'
-                                      # Gradient Boosting is left out: about 20x slower
+PERMUTATION_MODELS = 'Random Forest, SVM, Gradient Boosting, Logistic Regression, LDA, Ridge'
+                                      # all six. Gradient Boosting takes nearly all of the
+                                      # time (about 33 of 34 minutes for 45 spectra on an
+                                      # 8-core laptop; about 2 minutes without it): remove
+                                      # it from this list for a quicker run. The run
+                                      # also tests the best of these models against the best
+                                      # in each shuffle, which allows for picking the winner
 N_JOBS = -1                           # parallel workers for the seed-averaged importances and
                                       # the permutation test (-1 = all cores)
 

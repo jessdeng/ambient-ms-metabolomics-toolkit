@@ -39,13 +39,16 @@ def parse_path(rel_path):
 
 
 def resolve_design(experiment_dir, names, manifest_name='metadata_manifest.csv',
-                   expected_tech_reps=None, min_colonies=2):
+                   expected_tech_reps=None, min_colonies=2, allow_unequal_colonies=False):
     """Return (condition, colony_id) arrays aligned with ``names``.
 
     colony_id is '<condition>::<colony>' so it is unique across conditions.
     Raises if a file is missing from the manifest, if a condition has fewer than
-    ``min_colonies`` colonies, or (when given) if a colony does not have
-    ``expected_tech_reps`` spectra.
+    ``min_colonies`` colonies, if a colony does not have ``expected_tech_reps``
+    spectra (when given), or if the colonies do not all have the same number of
+    spectra (unless ``allow_unequal_colonies``). Unequal colonies usually mean
+    one colony named two ways ('AmbB5T1' next to 'AmberB5T2'): its sprays would
+    then be split between training and test folds and counted as two colonies.
     """
     path = os.path.join(experiment_dir, manifest_name) if manifest_name else None
     if path and os.path.exists(path):
@@ -80,6 +83,17 @@ def resolve_design(experiment_dir, names, manifest_name='metadata_manifest.csv',
         off = {i: int(n) for i, n in zip(ids, counts) if n != expected_tech_reps}
         if off:
             raise ValueError(f"Colonies without {expected_tech_reps} spectra: {off}")
+    if not allow_unequal_colonies:
+        ids, counts = np.unique(colony_id, return_counts=True)
+        usual = int(np.bincount(counts).argmax())
+        off = {str(i): int(n) for i, n in zip(ids, counts) if n != usual}
+        if off:
+            raise ValueError(
+                f"{len(off)} colonies do not have the usual {usual} spectra: {off}. If these are "
+                "one colony named two ways, fix the file names or write a metadata manifest "
+                "(python src/shared/grouping.py data/<experiment>, then correct its 'colony' "
+                "column). If the colonies really have different numbers of spectra, set "
+                "ALLOW_UNEQUAL_COLONIES to true.")
     return cond, colony_id
 
 

@@ -105,7 +105,7 @@ Your data stay on your computer: everything under `data/` is excluded from Git.
    ```bash
    python src/standard/run_analysis.py --config configs/my_settings.json --experiment my_experiment
    ```
-   One isolate (45 spectra) takes about 3–4 minutes on a laptop, almost all of it the classifier comparison (Gradient Boosting is slow). Set `"RUN_CLASSIFIERS": false` in your settings file for a 15-second run without it.
+   One isolate (45 spectra) takes about 35 minutes on an 8-core laptop, almost all of it the permutation test for Gradient Boosting. For a run of about 2 minutes, remove `Gradient Boosting` from `PERMUTATION_MODELS` in your settings file; set `"RUN_PERMUTATION": false` and `"RUN_CLASSIFIERS": false` for a 15-second run without either.
 3. Repeat with `--experiment experiment_b`, `--experiment experiment_c`, and so on.
 
 ## 7. Find and read the results
@@ -121,7 +121,7 @@ Start with these files:
 | `candidates_my_experiment.csv` | the prioritised m/z bins: how they rank, which condition stands apart (`colony_pattern`), how reproducible the sprays are (`technical_cv_pct`), whether the raw profile shows a real peak (`apex_mz`, `baseline_share`) and any isotope/adduct partners |
 | `pca_my_experiment.png` + `pca_explained_variance_my_experiment.csv` | dominant structure; for each PC, how much of its variance follows condition-plate, colony or technical replicate |
 | `feature_rankings_my_experiment.csv` | every m/z bin, with the same columns |
-| `ranker_concordance_my_experiment.csv` | how far the rankers agree, against chance |
+| `ranker_concordance_my_experiment.csv` | how far the rankers agree, against two unrelated lists and, for univariate F against VIP, against shuffled labels |
 | `classifier_comparison_my_experiment.png` + `classifier_accuracy_my_experiment.csv` | test accuracy per fold for six classifiers, train vs test (how well the condition-plates can be told apart) |
 | `spectrum_features_my_experiment.png` | where the candidates sit in the spectra |
 

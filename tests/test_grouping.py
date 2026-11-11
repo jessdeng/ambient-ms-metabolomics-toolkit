@@ -27,6 +27,11 @@ def test_folder_design_and_checks(tmp_path):
         resolve_design(str(tmp_path), [n for n in NAMES if 'c2' not in n or n.startswith('A')])
     with pytest.raises(ValueError, match='without 3 spectra'):
         resolve_design(str(tmp_path), NAMES, expected_tech_reps=3)
+    uneven = NAMES + ['A/c1T3.csv']                                # one colony with a third spray
+    with pytest.raises(ValueError, match='do not have the usual 2 spectra.*A::c1'):
+        resolve_design(str(tmp_path), uneven)
+    cond, col = resolve_design(str(tmp_path), uneven, allow_unequal_colonies=True)
+    assert (col == 'A::c1').sum() == 3
     with pytest.warns(UserWarning, match='its own colony'):
         resolve_design(str(tmp_path), [f'A/x{i}.csv' for i in range(2)] + [f'B/y{i}.csv' for i in range(2)])
 

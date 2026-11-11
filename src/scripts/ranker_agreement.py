@@ -2,7 +2,8 @@
 ranker_agreement.py — how far every pair of rankings agrees.
 
 Left: top-N agreement (Jaccard) between every pair of rankers, with the value
-expected by chance. Right: univariate-F rank against component-1 VIP rank for
+expected of two unrelated lists and, for univariate F against VIP, the value
+obtained with the condition labels shuffled among colonies. Right: univariate-F rank against component-1 VIP rank for
 every bin (log axes); candidates are coloured, filled if consistent across
 colonies.
 
@@ -53,8 +54,12 @@ def figure(experiment, safe, folder):
     a1.set_xticks(range(len(names))); a1.set_yticks(range(len(names)))
     a1.set_xticklabels([NAMES.get(n, n) for n in names], rotation=30, ha='right', fontsize=8)
     a1.set_yticklabels([NAMES.get(n, n) for n in names], fontsize=8)
-    a1.set_title(f'Top-{config.TOP_N_FEATURES} agreement (Jaccard)\nchance = {conc.chance.iloc[0]:.3f}',
-                 fontsize=10, loc='left')
+    title = (f'Top-{config.TOP_N_FEATURES} agreement (Jaccard)\n'
+             f'two unrelated lists: {conc.chance.iloc[0]:.3f}')
+    shuffled = conc.get('shuffled_jaccard_mean', pd.Series(dtype=float)).dropna()
+    if len(shuffled):                       # the reference for the two voters
+        title += f'; F vs VIP, shuffled labels: {shuffled.iloc[0]:.2f}'
+    a1.set_title(title, fontsize=10, loc='left')
     fig.colorbar(im, ax=a1, shrink=0.7)
 
     rest = ranks[~ranks.candidate]

@@ -99,6 +99,15 @@ def validate_spectra(X, mz, names=None):
         raise ValueError(f"empty spectra: {who(empty)}")
 
 
+def identical_spectra(X, names):
+    """Groups of files whose intensities are identical point for point (a
+    spectrum exported or copied twice). Returns a list of lists of names."""
+    seen = {}
+    for name, row in zip(names, np.asarray(X, float)):
+        seen.setdefault(np.ascontiguousarray(row).tobytes(), []).append(name)
+    return [group for group in seen.values() if len(group) > 1]
+
+
 def bin_spectra(X: ArrayLike, mz: ArrayLike, bin_width: float = 0.5, mz_min: float = 100.0,
                 mz_max: float = 2000.0, labels: str = 'mean_mz') -> tuple[FloatArray, FloatArray]:
     """Sum profile points into the half-open bins [mz_min + k*w, mz_min + (k+1)*w).

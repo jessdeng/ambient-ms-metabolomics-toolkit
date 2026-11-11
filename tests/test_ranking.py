@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.ranking import (colony_means, univariate_screen, colony_consistency, variance_partition,
                             technical_cv, rank_features, concordance, benjamini_hochberg, top_set,
-                            ties_at_cutoff,
+                            ties_at_cutoff, stands_apart, voter_agreement_null,
                             selected_by, VOTERS, METHODS)
 from shared.pca import nested_variance_components
 
@@ -120,3 +120,26 @@ def test_concordance_and_helpers():
     assert ties_at_cutoff(np.zeros(4), 2) == 0
     p = np.array([0.01, 0.04, 0.03, 0.5])
     np.testing.assert_allclose(benjamini_hochberg(p), [0.04, 0.16 / 3, 0.16 / 3, 0.5])
+
+
+def test_stands_apart_matches_colony_consistency():
+    Xc, _, cond_c = colony_means(_data(seed=3), COL, COND)
+    screen = univariate_screen(Xc, cond_c)
+    slow = colony_consistency(Xc, cond_c, screen['top_condition'].to_numpy(),
+                              screen['bottom_condition'].to_numpy())['colonies_consistent'].to_numpy()
+    fast = stands_apart(Xc, cond_c)
+    assert fast[:5].all() and (fast == slow).all()
+
+
+def test_voter_agreement_null_is_the_reference_for_the_two_voters():
+    from standard.preprocessing import scale
+    Xc, _, cond_c = colony_means(_data(seed=1, effect=0.0), COL, COND)          # no condition effect
+    a = voter_agreement_null(scale(Xc), Xc, cond_c, top_n=50, n_permutations=60, seed=5)
+    b = voter_agreement_null(scale(Xc), Xc, cond_c, top_n=50, n_permutations=60, seed=5)
+    assert (a['null_shared'] == b['null_shared']).all()                       # reproducible
+    # with no effect the voters still share far more than two unrelated lists (50 * 50 / 300 = 8.3)
+    assert a['null_shared'].mean() > 15 and a['p_shared'] > 0.05
+    assert a['observed_consistent'] <= a['observed_shared'] <= 50
+    assert a['n_permutations'] == 60 and len(a['null_consistent']) == 60
+    table, _ = rank_features(scale(Xc), Xc, cond_c, top_n=50, rf_seeds=2, gb_seeds=2)
+    assert a['observed_shared'] == int(table['candidate'].sum())              # same count as the table

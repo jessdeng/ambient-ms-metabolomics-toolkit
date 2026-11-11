@@ -44,7 +44,7 @@ Without a manifest the colony is read from the layout: `<condition>/<colony>/<fi
 python src/shared/grouping.py data/MY_EXPERIMENT
 ```
 
-Then fix `class` and `colony` for any file named inconsistently (e.g. `AmbB5T1` next to `AmberB5T2`). `EXPECTED_TECH_REPS` (e.g. `3`) stops the run if a colony has a different number of spectra.
+Then fix `class` and `colony` for any file named inconsistently (e.g. `AmbB5T1` next to `AmberB5T2`). The run stops if the colonies do not all have the same number of spectra, because that usually means one colony named two ways: its sprays would be split between training and test folds and counted as two colonies. Set `ALLOW_UNEQUAL_COLONIES` to `true` if the design really is unbalanced. `EXPECTED_TECH_REPS` (e.g. `3`) also stops the run if a colony has a different number of spectra. Files with identical intensities (one spectrum exported twice) are reported as a warning.
 
 ## What the analysis does
 
@@ -74,6 +74,7 @@ Then fix `class` and `colony` for any file named inconsistently (e.g. `AmbB5T1` 
 
    - **`n_methods`** counts how many of the six place a bin in their top-N. It is descriptive: the three linear models are closely related, so their votes are not independent. A method's top-N holds only bins it gave a non-zero score, so it can be shorter than N (gradient boosting on a small design); the run prints a note when that happens.
    - **Cross-family consensus** gives each family one vote. By default a bin qualifies when it is top-N in at least two of the three families.
+   - **Agreement is not evidence by itself.** Every ranking is fitted to the same colony means, so two rankings share far more of their top-N than two unrelated lists would. For the two voters the run therefore shuffles the condition labels among colonies `N_RANKING_PERMUTATIONS` times, recomputes both rankings, and reports how many top-N bins they share then. On the datasets this was developed on they share about as many with shuffled labels (19–22 of 50) as with the real ones (14–23), so a bin being picked by both is a reason to look at it and nothing more.
    - **Figures:** the method intersections and the top features by consensus (`corroboration_<exp>.png`), and the pairwise agreement of all seven rankings (`ranker_agreement_<exp>.png`).
    - **Reading it:** with 15 colonies and about 2,700 bins, Ridge's top-50 is set by its penalty and the tree ensembles break ties between equally good splits at random, so their top-50 lists change with the seed. Both are therefore averaged over 100 seeds; even then the two halves of the seeds agree only in part (top-50 Jaccard 0.47–0.64 for the random forest and 0.47–0.85 for gradient boosting on the datasets this was developed on; printed in every run). Agreement between methods is a reason to look at a feature, not proof.
 9. **Follow-up list.** A bin is on the list if it is top-N in both voting rankers, or if it meets the cross-family consensus. The column `selected_by` says which.
@@ -86,7 +87,7 @@ Then fix `class` and `colony` for any file named inconsistently (e.g. `AmbB5T1` 
    - **Evaluation:** folds hold out whole colonies and keep every condition in every test fold (3-fold × 10 repeats with three colonies per condition). Filters, log offset and scaling are refitted on the training colonies in every fold.
    - **Output:** test accuracy per fold, and mean train vs test accuracy.
    - **Reading it:** accuracy measures how well the condition-plates can be told apart, not a light effect. The fold-to-fold spread is as large as the differences between models, so which model "wins" is not a stable finding with three colonies per condition. On F11A the earlier version of this pipeline, which differs in preprocessing, ranked Ridge first; this one ranks Random Forest first, and with folds that were not balanced by condition it ranked Gradient Boosting first.
-12. **Permutation test.** The condition labels are shuffled among colonies (a colony's spectra keep one label) and the whole cross-validation is repeated, `N_PERMUTATIONS` times per model. The smallest attainable p-value is 1 / (permutations + 1). Gradient Boosting is left out by default because it is about 20 times slower.
+12. **Permutation test.** The condition labels are shuffled among colonies (a colony's spectra keep one label) and the whole cross-validation is repeated, `N_PERMUTATIONS` times for each of the six models. The smallest attainable p-value is 1 / (permutations + 1). Every model sees the same shuffles, so the run also compares the best model's accuracy with the best accuracy in each shuffle (`Best of these models`), which allows for picking the winner. Gradient Boosting takes nearly all of the time: one experiment of 45 spectra took 34 minutes on an 8-core laptop, 33 of them this step, against about 2 minutes with Gradient Boosting removed from `PERMUTATION_MODELS`.
 13. **Report.** `summary_<exp>.txt` gathers the design, the settings, the method comparison, the follow-up list with its evidence, the classifier accuracies and the permutation test.
 
 ## Settings
@@ -96,7 +97,7 @@ All settings and their defaults are in [config.py](config.py). Override them in 
 | Setting | Default | Meaning |
 |---|---|---|
 | `EXPERIMENT` | `sample_experiment` | folder under `data/` (or `--experiment`); `all` runs every experiment (or `--all`) |
-| `METADATA_MANIFEST`, `EXPECTED_TECH_REPS` | `metadata_manifest.csv`, none | design file; replicate-count check |
+| `METADATA_MANIFEST`, `EXPECTED_TECH_REPS`, `ALLOW_UNEQUAL_COLONIES` | `metadata_manifest.csv`, none, false | design file; replicate-count check; allow colonies with different numbers of spectra |
 | `MZ_MIN`, `MZ_MAX`, `BIN_WIDTH` | 100, 2000, 0.5 | m/z range and bin width (Da) |
 | `BIN_LABELS` | `mean_mz` | bin label: mean m/z of its points, `centroid` (intensity-weighted mean m/z), or `lower_edge` (MetaboAnalyst) |
 | `VARIANCE_PERCENTILE`, `ABUNDANCE_PERCENTILE` | 25, 5 | label-free filters |
@@ -106,8 +107,9 @@ All settings and their defaults are in [config.py](config.py). Override them in 
 | `RF_SEEDS`, `GB_SEEDS`, `RANDOM_SEED` | 100, 100, 42 | seeds averaged for the random-forest and gradient-boosting importances; seed for everything |
 | `CONSENSUS_RULE`, `CONSENSUS_MIN_FAMILIES_TOPK`, `CONSENSUS_MAX_WORST_FAMILY_RANK` | `n_families_topk`, 2, 50 | cross-family consensus: top-N in at least this many families, or (`worst_family_rank`) ranked this well in every family |
 | `MIN_METHODS_OVERLAP` | 2 | `feature_overlap` table: bins in the top-N of at least this many methods |
+| `N_RANKING_PERMUTATIONS` | 500 | label shuffles used as the reference for the agreement between univariate F and VIP (0 = skip) |
 | `RUN_CLASSIFIERS`, `CV_FOLDS`, `N_CV_REPEATS` | true, 5, 10 | classifier comparison; folds reduced to the smallest colonies-per-condition |
-| `RUN_PERMUTATION`, `N_PERMUTATIONS`, `PERMUTATION_MODELS`, `N_JOBS` | true, 200, all but Gradient Boosting, -1 | permutation test; models as a comma-separated list; parallel workers for it and for the seed-averaged importances (-1 = all cores) |
+| `RUN_PERMUTATION`, `N_PERMUTATIONS`, `PERMUTATION_MODELS`, `N_JOBS` | true, 200, all six models, -1 | permutation test; models as a comma-separated list; parallel workers for it and for the seed-averaged importances (-1 = all cores) |
 | `N_PCA_COMPONENTS`, `N_TOP_VIP`, `SIGNAL_R_MIN` | 5, 30, 0.9 | descriptive outputs |
 
 ## Outputs (`results/<experiment>/`)
@@ -118,13 +120,13 @@ All settings and their defaults are in [config.py](config.py). Override them in 
 | `candidates_<exp>.csv` | the follow-up list with `selected_by`, `n_methods`, all evidence columns and each colony's mean |
 | `feature_rankings_<exp>.csv` | every bin: score, rank and top-N membership for all seven rankings, `n_rankers`, `n_methods`, family ranks (`agg_*`), `consensus`, the colony-level screen (`screen_F`, `screen_eta2`, `screen_p`, `screen_q`, log2 fold change), variance partition, technical %CV, colony pattern, signal group |
 | `feature_overlap_<exp>.csv` | bins in the top-N of at least two methods, or meeting the cross-family consensus; sorted by consensus rank |
-| `ranker_concordance_<exp>.csv` | top-N Jaccard and shared count between every pair of rankings, with the chance level |
+| `ranker_concordance_<exp>.csv` | top-N Jaccard and shared count between every pair of rankings, with the value expected of two unrelated lists (`chance`) and, for univariate F against VIP, the shared count with shuffled labels (`shuffled_*`) |
 | `corroboration_<exp>.png` | method comparison: which methods select the same bins (intersections), and the top bins by cross-family consensus with their vote count and top condition |
 | `ranker_agreement_<exp>.png` | pairwise top-N agreement of all rankings; univariate-F rank against VIP rank |
 | `pca_*` | explained variance with its condition-plate / colony / technical split, scores, top loadings, figure |
 | `signal_groups_<exp>.csv` | adjacent bins merged into one peak when the raw profile supports it |
 | `classifier_comparison_<exp>.png`, `classifier_accuracy_<exp>.csv` | test accuracy per fold for the six classifiers, train vs test; mean ± SD per model with the chance level |
-| `permutation_test_<exp>.csv` | observed and shuffled-label accuracy and the p-value for each model |
+| `permutation_test_<exp>.csv` | observed and shuffled-label accuracy and the p-value for each model, and for the best of the models |
 | `vip_scores_<exp>.png`, `spectrum_features_<exp>.png` | top-VIP plot; condition-mean spectra with the follow-up list marked |
 | `condition_abundance_<exp>.png` | the follow-up list by condition and by colony |
 | `condition_spectrum_<exp>.html` | interactive condition-mean spectra with the follow-up list marked |
@@ -187,7 +189,7 @@ The smallest attainable p-value is 1 / (permutations + 1). As everywhere in this
 
 ## Reproducing the manuscript's Table 1
 
-The exact published Table 1 used the earlier version (legacy 5000-point resampling, preprocessing before the folds), frozen at tag `v2-table1-snapshot`:
+The exact published Table 1 used the earlier version, frozen at tag `v2-table1-snapshot`. It differs from this one in the spectra it uses (legacy 5000-point resampling) and in the folds (a single 3-fold split of the colonies by `StratifiedGroupKFold`, which does not keep every condition in every test fold). In both versions whole colonies are held out and the filters, normalisation, transform and scaling are fitted inside each training fold. The snapshot reads colonies from the file names with no check, so an experiment with a colony named two ways is grouped wrongly there:
 
 ```bash
 git checkout v2-table1-snapshot
